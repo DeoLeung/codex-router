@@ -421,11 +421,14 @@ export async function collectResponsesRequest(client, requestBody, {
   signal,
   preludeTimeoutMs = RESPONSES_WS_PRELUDE_TIMEOUT_MS,
   maxEventBytes = MAX_BUFFERED_RESPONSE_BYTES,
+  onSettled,
 } = {}) {
   // Drive exactly one `response.create` over an idle client and resolve with
   // a fetch-`Response`-shaped result: the downstream pipeline (SSE transforms,
   // usage observers, error classification) consumes it without knowing the
-  // upstream leg was a WebSocket.
+  // upstream leg was a WebSocket. `onSettled` fires exactly once, when the
+  // turn's body is complete (terminal event, error frame, cancellation, or
+  // failure) -- the hook a connection pool releases its lease on.
   return new Promise((resolve, reject) => {
     let settled = false;
     let streamEnded = false;
@@ -435,6 +438,12 @@ export async function collectResponsesRequest(client, requestBody, {
     let streamController = undefined;
     let streamStarted = false;
     let eventBytes = 0;
+    let settledCallbackRun = false;
+    const settledCallback = () => {
+      if (settledCallbackRun) return;
+      settledCallbackRun = true;
+      onSettled?.();
+    };
     const preludeTimer = setTimeout(() => {
       // Nothing arrived at all. The provider may have accepted the turn or
       // not; silently resending is how double-billing happens, so fail it.
@@ -444,6 +453,7 @@ export async function collectResponsesRequest(client, requestBody, {
         "Upstream produced no Responses event before the prelude timeout.",
         "ERR_WS_PRELUDE_TIMEOUT",
       )));
+      settledCallback();
       client.abort();
     }, preludeTimeoutMs);
     preludeTimer.unref?.();
@@ -469,6 +479,7 @@ export async function collectResponsesRequest(client, requestBody, {
         cancel() {
           // The downstream consumer went away; stop the upstream turn.
           streamEnded = true;
+          settledCallback();
           client.abort();
         },
       });
@@ -476,7 +487,7 @@ export async function collectResponsesRequest(client, requestBody, {
         "content-type": "text/event-stream",
         ...headersFromMetadataFrames(metadataFrames),
       });
-      settle(() => resolve({ status: 200, headers, body }));
+      settle(() => resolve({ status: 200, ok: true, headers, body }));
     };
 
     const settle = (complete) => {
@@ -511,8 +522,10 @@ export async function collectResponsesRequest(client, requestBody, {
         });
         settle(() => {
           client.close(1000, "error frame");
+          settledCallback();
           resolve({
             status,
+            ok: false,
             headers,
             body: new Response(JSON.stringify({ error: frame.error ?? {} })).body,
           });
@@ -526,6 +539,7 @@ export async function collectResponsesRequest(client, requestBody, {
       if (eventBytes > maxEventBytes) {
         settle(() => {
           client.abort();
+          settledCallback();
           reject(new WsTransportError("Responses event exceeds the buffered bound.", "ERR_WS_EVENT_TOO_LARGE"));
         });
         return;
@@ -547,6 +561,7 @@ export async function collectResponsesRequest(client, requestBody, {
         sawTerminal = true;
         settle(() => {});
         endStream();
+        settledCallback();
       }
     };
 
@@ -554,6 +569,7 @@ export async function collectResponsesRequest(client, requestBody, {
     client.onClose = () => {
       if (!settled) {
         settle(() => {
+          settledCallback();
           reject(new WsTransportError("Upstream WebSocket closed before the turn completed.", "ERR_WS_CLOSED_MID_TURN"));
         });
         return;
@@ -578,17 +594,26 @@ export async function collectResponsesRequest(client, requestBody, {
       }
     };
     const onAbort = () => {
+      settle(() => {
+        settledCallback();
+        reject(new WsTransportError("Request aborted.", "ERR_WS_ABORTED"));
+      });
       client.abort();
-      settle(() => reject(new WsTransportError("Request aborted.", "ERR_WS_ABORTED")));
     };
     signal?.addEventListener("abort", onAbort, { once: true });
 
     client.sendJson({ type: "response.create", ...requestBody }).then((sent) => {
       if (!sent) {
-        settle(() => reject(new WsTransportError("Upstream WebSocket was not writable.", "ERR_WS_NOT_WRITABLE")));
+        settle(() => {
+          settledCallback();
+          reject(new WsTransportError("Upstream WebSocket was not writable.", "ERR_WS_NOT_WRITABLE"));
+        });
       }
     }, (error) => {
-      settle(() => reject(error instanceof Error ? error : new WsTransportError(String(error))));
+      settle(() => {
+        settledCallback();
+        reject(error instanceof Error ? error : new WsTransportError(String(error)));
+      });
     });
   });
 }
@@ -621,4 +646,19 @@ export function responsesWebSocketTransportUsable(environment = process.env, exe
   // A hand-rolled socket has no EnvHttpProxyAgent underneath it, so a proxy
   // in the environment silently blackholes the connect. Disable instead.
   return !environmentHttpProxyConfigured(environment, execArgv);
+}
+
+// The transport's operator knobs, preserved in the installed service so a
+// shell-set value survives the launchd/systemd/Task Manager boundary.
+export function responsesWsServiceEnvironment(environment = process.env) {
+  const values = {};
+  for (const name of [
+    "MODEL_ROUTER_NATIVE_TRANSPORT",
+    "CODEX_ROUTER_NATIVE_TRANSPORT",
+    "MODEL_ROUTER_WS_PRELUDE_TIMEOUT_MS",
+    "CODEX_ROUTER_WS_PRELUDE_TIMEOUT_MS",
+  ]) {
+    if (environment[name] !== undefined) values[name] = environment[name];
+  }
+  return values;
 }

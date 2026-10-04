@@ -95,8 +95,17 @@ import {
   stripCodexEncryptedSchemaAnnotation,
 } from "./tool-schema-root.mjs";
 import { requestGenericProvider } from "./generic-providers.mjs";
+import { genericProviderWebSocketTarget } from "./generic-providers.mjs";
 import { genericProviderConfigured } from "./generic-provider-readiness.mjs";
 import { withoutInputMessagePhase } from "./message-phase.mjs";
+import {
+  WsUpgradeRefusedError,
+  collectResponsesRequest,
+  markWsTransportFailure,
+  responsesWebSocketTransportUsable,
+  wsTransportAvailable,
+} from "./responses-ws-client.mjs";
+import { providerPoolRegistry } from "./provider-ws-pool.mjs";
 import { providerTransportError } from "./transport-failure.mjs";
 import {
   endpointCapabilityError,
@@ -1807,6 +1816,77 @@ function localModels(response) {
   });
 }
 
+// WebSocket transport for generic providers that opted in with
+// transport=websocket: the turn rides a pooled persistent connection speaking
+// responses_websockets, and the provider holds the conversation state so a
+// follow-up turn carries only its new input. Every failure before the frame
+// is sent returns false and the caller takes the ordinary HTTP path, so a
+// provider without WebSocket support costs one handshake, not a turn.
+const genericProviderPools = providerPoolRegistry({
+  resolveProvider: (providerId) => ({
+    wsTarget: () => genericProviderWebSocketTarget(providerId),
+  }),
+});
+
+function genericWsBreakerKey(providerId) {
+  return `generic-ws:${providerId}`;
+}
+
+async function acquireGenericWebSocketResponses(normalized, controller) {
+  const providerId = normalized.provider.id;
+  if (!wsTransportAvailable(genericWsBreakerKey(providerId))) return undefined;
+  if (!responsesWebSocketTransportUsable()) return undefined;
+  let lease;
+  try {
+    lease = await genericProviderPools.poolFor(providerId).acquire(controller.signal);
+  } catch (error) {
+    if (error instanceof WsUpgradeRefusedError || error?.fallbackToHttp) {
+      markWsTransportFailure(genericWsBreakerKey(providerId));
+      console.warn(
+        "[api-forwarder] websocket transport unavailable provider=%s%s; using HTTP",
+        providerId,
+        error instanceof WsUpgradeRefusedError && error.status !== undefined
+          ? ` upgrade_status=${error.status}`
+          : "",
+      );
+      return undefined;
+    }
+    throw error;
+  }
+  const abandon = () => {
+    lease.connection.abort();
+    lease.release();
+  };
+  let payload;
+  try {
+    payload = JSON.parse(normalized.body.toString("utf8"));
+  } catch {
+    lease.release();
+    return undefined;
+  }
+  // The protocol carries streaming turns only; a non-stream request keeps the
+  // HTTP path, where the SSE-to-JSON conversion for those turns already lives.
+  if (payload?.stream !== true || !Array.isArray(payload.input)) {
+    lease.release();
+    return undefined;
+  }
+  let result;
+  try {
+    result = await collectResponsesRequest(lease.connection, payload, {
+      signal: controller.signal,
+      onSettled: () => lease.release(),
+    });
+  } catch (error) {
+    abandon();
+    if (error instanceof WsUpgradeRefusedError) {
+      markWsTransportFailure(genericWsBreakerKey(providerId));
+      return undefined;
+    }
+    throw error;
+  }
+  return { result };
+}
+
 async function handleRequest(request, response) {
   const startedAt = Date.now();
   const requestUrl = new URL(
@@ -1849,6 +1929,13 @@ async function handleRequest(request, response) {
   // resolve it through the built-in credential path or construct its URL here;
   // either would bypass the confinement #404 established.
   if (normalized.provider.generic === true) {
+    if (normalized.provider.transport === "websocket" && route === "/responses") {
+      const ws = await acquireGenericWebSocketResponses(normalized, controller);
+      if (ws) {
+        await relayUpstreamResponse(normalized, ws.result, response, startedAt);
+        return;
+      }
+    }
     const { response: upstream, dispatcher } = await requestGenericProvider(
       normalized.provider.id,
       `${route}${requestUrl.search}`,
@@ -2285,3 +2372,7 @@ server.listen(LISTEN_PORT, LISTEN_HOST, () => {
 });
 
 installGracefulShutdown(server, { label: "api-forwarder" });
+// Pooled upstream WebSocket connections hold sockets open past the HTTP
+// server's own drain; shut them down with the process.
+process.once("SIGTERM", () => genericProviderPools.closeAll());
+process.once("SIGINT", () => genericProviderPools.closeAll());

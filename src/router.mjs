@@ -101,6 +101,17 @@ import {
   providerForModel,
 } from "./model-registry.mjs";
 import { isProviderPrefixedSlug, unroutedModelError } from "./unrouted-model.mjs";
+import {
+  ResponsesWebSocketClient,
+  WsUpgradeRefusedError,
+  collectResponsesRequest,
+  markWsTransportFailure,
+  nativeWebSocketTransportEnabled,
+  responsesWebSocketTransportUsable,
+  responsesWebSocketUrl,
+  wsTransportAvailable,
+} from "./responses-ws-client.mjs";
+import { ProviderWebSocketPool } from "./provider-ws-pool.mjs";
 import { createHealthCache } from "./health-cache.mjs";
 import { discoveryDisabled } from "./discovery-mode.mjs";
 import { readNativeAliases } from "./native-alias.mjs";
@@ -1017,8 +1028,115 @@ function routedHeaders() {
 // DeepSeek's current model already speaks Codex's wire protocol. The shared
 // API forwarder still owns credentials and upstream transport; bypass only
 // LiteLLM, whose unknown-model fallback simulates native Responses streaming.
+function usesProviderResponsesWebSocket(route) {
+  const provider = providerForModel(route);
+  return provider?.generic === true && provider?.transport === "websocket";
+}
+
+// The native upstream leg over the Responses WebSocket protocol. Native turns
+// are stateless full conversations either way (Codex re-sends the body on
+// HTTP, and this transport carries it as one frame), so the win here is the
+// persistent connection -- no per-turn TLS handshake -- not a smaller body.
+// Enabled by default with automatic HTTP fallback and a shared breaker: an
+// upstream that has no WebSocket route costs one handshake per window.
+const NATIVE_WS_BREAKER_KEY = "native-responses-ws";
+const nativeWsPools = new Map();
+
+function nativeWsPoolFor(authorization, accountId) {
+  // Connections are per credential: the handshake freezes the bearer and the
+  // account id, so a substituted session never rides a caller's socket.
+  const key = `${authorization || ""}|${accountId || ""}`;
+  let pool = nativeWsPools.get(key);
+  if (!pool) {
+    pool = new ProviderWebSocketPool({
+      connect: (signal) => ResponsesWebSocketClient.connect(
+        responsesWebSocketUrl(`${NATIVE_BASE}/responses`),
+        {
+          headers: {
+            ...(authorization ? { Authorization: authorization } : {}),
+            ...(accountId ? { "chatgpt-account-id": accountId } : {}),
+          },
+          signal,
+        },
+      ),
+    });
+    nativeWsPools.set(key, pool);
+  }
+  return pool;
+}
+
+function nativeWebSocketTransportSelected() {
+  return (
+    nativeWebSocketTransportEnabled() &&
+    responsesWebSocketTransportUsable() &&
+    wsTransportAvailable(NATIVE_WS_BREAKER_KEY)
+  );
+}
+
+async function nativeResponsesWebSocketFetch(url, init) {
+  const authorization = init.headers.authorization || init.headers.Authorization;
+  const accountId = init.headers["chatgpt-account-id"];
+  let payload;
+  try {
+    payload = JSON.parse(init.body.toString("utf8"));
+  } catch {
+    payload = undefined;
+  }
+  // The protocol carries streaming Responses turns only; anything else keeps
+  // the HTTP leg it was built for.
+  if (!payload || payload.stream !== true || !Array.isArray(payload.input)) {
+    return fetchObservedUpstream(url, init);
+  }
+  // Per-request identity rides the frame (client_metadata), never the frozen
+  // handshake: a pooled connection may outlive many sessions.
+  const metadata = {
+    ...(typeof init.headers.session_id === "string" ? { session_id: init.headers.session_id } : {}),
+    ...(typeof init.headers["thread-id"] === "string" ? { thread_id: init.headers["thread-id"] } : {}),
+  };
+  if (Object.keys(metadata).length) {
+    payload.client_metadata = { ...metadata, ...(payload.client_metadata || {}) };
+  }
+  let lease;
+  try {
+    lease = await nativeWsPoolFor(authorization, accountId).acquire(init.signal);
+  } catch (error) {
+    if (error instanceof WsUpgradeRefusedError || error?.fallbackToHttp) {
+      markWsTransportFailure(NATIVE_WS_BREAKER_KEY);
+      console.error(
+        "[codex-router] native websocket transport unavailable%s; using HTTP",
+        error instanceof WsUpgradeRefusedError && error.status !== undefined
+          ? ` upgrade_status=${error.status}`
+          : "",
+      );
+      return fetchObservedUpstream(url, init);
+    }
+    throw error;
+  }
+  try {
+    return await collectResponsesRequest(lease.connection, payload, {
+      signal: init.signal,
+      onSettled: () => lease.release(),
+    });
+  } catch (error) {
+    lease.connection.abort();
+    lease.release();
+    if (error instanceof WsUpgradeRefusedError) {
+      markWsTransportFailure(NATIVE_WS_BREAKER_KEY);
+      return fetchObservedUpstream(url, init);
+    }
+    throw error;
+  }
+}
+
 function routedResponsesTarget(route) {
-  return `${usesDeepSeekResponses(route) ? API_BASE : GATEWAY_BASE}/responses`;
+  // WebSocket-transport providers terminate at the api-forwarder directly,
+  // exactly like DeepSeek Responses: LiteLLM has no WebSocket leg, and the
+  // forwarder owns both the credential boundary and the pooled upstream
+  // connections. Their litellm.yaml entries stay but go unused.
+  if (usesDeepSeekResponses(route) || usesProviderResponsesWebSocket(route)) {
+    return `${API_BASE}/responses`;
+  }
+  return `${GATEWAY_BASE}/responses`;
 }
 
 // LiteLLM translates Codex Responses requests into Chat Completions only after
@@ -4592,6 +4710,7 @@ async function handleResponses(request, response, requestUrl) {
     let target;
     let headers;
     let routedBody;
+    let nativeWsTransport = false;
     let builtSearchMode;
     let namespacesFlattened = false;
     let flattenedNamespaces = new Map();
@@ -4808,12 +4927,19 @@ async function handleResponses(request, response, requestUrl) {
           bufferNativeStream = true;
         }
       }
+      nativeWsTransport = !compactV1 && !compactV2 && nativeWebSocketTransportSelected();
       target = nativeTarget(requestUrl.pathname);
       headers = nativeHeaders(request);
-      routedBody = await compressedNativeBody(
-        Buffer.from(JSON.stringify(native), "utf8"),
-        headers,
-      );
+      // The native WebSocket transport speaks JSON frames, never a zstd
+      // Content-Encoding, so its turns keep the plain replayable body.
+      if (nativeWsTransport) {
+        routedBody = Buffer.from(JSON.stringify(native), "utf8");
+      } else {
+        routedBody = await compressedNativeBody(
+          Buffer.from(JSON.stringify(native), "utf8"),
+          headers,
+        );
+      }
     }
 
     // `routedBody` is a fully materialized Buffer -- plain JSON, or the zstd
@@ -4841,7 +4967,7 @@ async function handleResponses(request, response, requestUrl) {
         // Routed traffic terminates at the local gateway, which has its own
         // error translation and Retry-After handling below; leave it exactly
         // as it was.
-        fetchImpl: fetchObservedUpstream,
+        fetchImpl: nativeWsTransport ? nativeResponsesWebSocketFetch : fetchObservedUpstream,
         retries: route ? 0 : undefined,
         canRetry: () => nothingRelayed(response),
         onRetry: (event) => logUpstreamRetry(event, requestedModel, requestUrl.pathname),
