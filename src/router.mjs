@@ -1073,7 +1073,7 @@ function nativeWebSocketTransportSelected() {
   );
 }
 
-async function nativeResponsesWebSocketFetch(url, init) {
+async function nativeResponsesWebSocketFetch(url, init, { fallbackFetch }) {
   const authorization = init.headers.authorization || init.headers.Authorization;
   const accountId = init.headers["chatgpt-account-id"];
   let payload;
@@ -1085,7 +1085,7 @@ async function nativeResponsesWebSocketFetch(url, init) {
   // The protocol carries streaming Responses turns only; anything else keeps
   // the HTTP leg it was built for.
   if (!payload || payload.stream !== true || !Array.isArray(payload.input)) {
-    return fetchObservedUpstream(url, init);
+    return fallbackFetch(url, init);
   }
   // Per-request identity rides the frame (client_metadata), never the frozen
   // handshake: a pooled connection may outlive many sessions.
@@ -1100,17 +1100,17 @@ async function nativeResponsesWebSocketFetch(url, init) {
   try {
     lease = await nativeWsPoolFor(authorization, accountId).acquire(init.signal);
   } catch (error) {
-    if (error instanceof WsUpgradeRefusedError || error?.fallbackToHttp) {
-      markWsTransportFailure(NATIVE_WS_BREAKER_KEY);
-      console.error(
-        "[codex-router] native websocket transport unavailable%s; using HTTP",
-        error instanceof WsUpgradeRefusedError && error.status !== undefined
-          ? ` upgrade_status=${error.status}`
-          : "",
-      );
-      return fetchObservedUpstream(url, init);
-    }
-    throw error;
+    // Nothing left the machine yet: a refused upgrade, an unreachable host,
+    // or a full pool all mean this turn belongs on the HTTP leg. The breaker
+    // keeps a broken upstream from costing a handshake on every turn.
+    markWsTransportFailure(NATIVE_WS_BREAKER_KEY);
+    console.error(
+      "[codex-router] native websocket transport unavailable%s; using HTTP",
+      error instanceof WsUpgradeRefusedError && error.status !== undefined
+        ? ` upgrade_status=${error.status}`
+        : "",
+    );
+    return fallbackFetch(url, init);
   }
   try {
     return await collectResponsesRequest(lease.connection, payload, {
@@ -1122,7 +1122,7 @@ async function nativeResponsesWebSocketFetch(url, init) {
     lease.release();
     if (error instanceof WsUpgradeRefusedError) {
       markWsTransportFailure(NATIVE_WS_BREAKER_KEY);
-      return fetchObservedUpstream(url, init);
+      return fallbackFetch(url, init);
     }
     throw error;
   }
@@ -4967,7 +4967,9 @@ async function handleResponses(request, response, requestUrl) {
         // Routed traffic terminates at the local gateway, which has its own
         // error translation and Retry-After handling below; leave it exactly
         // as it was.
-        fetchImpl: nativeWsTransport ? nativeResponsesWebSocketFetch : fetchObservedUpstream,
+        fetchImpl: nativeWsTransport
+          ? (url, init) => nativeResponsesWebSocketFetch(url, init, { fallbackFetch: fetchObservedUpstream })
+          : fetchObservedUpstream,
         retries: route ? 0 : undefined,
         canRetry: () => nothingRelayed(response),
         onRetry: (event) => logUpstreamRetry(event, requestedModel, requestUrl.pathname),
@@ -6729,11 +6731,39 @@ server.on("upgrade", (request, socket, head) => {
   handleResponsesWebSocketUpgrade(request, socket, head, {
     callerKey: CALLER_KEY,
     authenticateUpgrade: () => hookEndpoint.pathname,
-    // The WebSocket is an edge translation only. Every complete request
-    // re-enters this caller-authenticated HTTP route, so routing, provider
-    // credentials, retries, failover, transforms, usage, and cancellation all
-    // continue to have one implementation.
+    // The WebSocket is an edge translation for every model whose provider
+    // speaks plain HTTP; routing, provider credentials, retries, failover,
+    // transforms, usage, and cancellation keep one implementation there. A
+    // websocket-transport provider instead relays the protocol itself through
+    // the forwarder's hop, so incremental turns stay incremental end to end.
     responsesUrl: `${callerBaseUrl(LISTEN_PORT, CALLER_KEY)}${hookEndpoint.capability ? CODEX_PATCH_HOOK_BASE_PATH.slice(3) : ""}/responses`,
+    relayTransport: {
+      resolveRoute: (model) => {
+        const route = MODEL_BY_SLUG.get(String(model || ""));
+        if (!route || !usesProviderResponsesWebSocket(route)) return undefined;
+        return { providerId: providerForModel(route)?.id };
+      },
+      connectHop: (providerId, signal) => ResponsesWebSocketClient.connect(
+        `${loopback(PORTS.api)}/_ws/providers/${encodeURIComponent(providerId)}`,
+        { headers: { Authorization: `Bearer ${INTERNAL_KEY}` }, signal },
+      ),
+      recordUsage: ({ model, provider, status, durationMs, usage }) => {
+        recordObservedUsage({
+          model,
+          provider,
+          status,
+          durationMs,
+          ...(Number.isFinite(usage?.input_tokens) ? { inputTokens: usage.input_tokens } : {}),
+          ...(Number.isFinite(usage?.output_tokens) ? { outputTokens: usage.output_tokens } : {}),
+          ...(Number.isFinite(usage?.total_tokens) ? { totalTokens: usage.total_tokens } : {}),
+        });
+        console.error(
+          `[codex-router] timing at=${new Date().toISOString()} model=${model} provider=${provider} ` +
+            `status=${status} total_ms=${durationMs} transport=websocket-relay` +
+            `${usage?.output_tokens !== undefined ? ` out_tokens=${usage.output_tokens}` : " out_tokens=unknown"}`,
+        );
+      },
+    },
   });
 });
 // Without this an 'error' event is unhandled and the process exits silently.

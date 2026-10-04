@@ -306,7 +306,18 @@ authenticates the caller capability before upgrading, accepts
 `previous_response_id` delta, and re-enters its own caller-authenticated HTTP
 Responses route. SSE response events are translated back to WebSocket JSON
 frames. The WebSocket edge never selects or contacts a provider itself, and
-the caller capability is never relayed to an upstream. HTTP request bodies may
+the caller capability is never relayed to an upstream. One exception keeps the
+edge translation from re-sending the whole conversation: when the frame's
+model belongs to a `transport: "websocket"` generic provider, the edge relays
+the protocol itself through an authenticated hop into the api-forwarder, which
+leases a pooled upstream WebSocket connection. A `previous_response_id` frame
+then crosses every hop as-is -- only the new input is sent -- and the provider
+holds the conversation state. A hop that cannot be opened falls back to the
+ordinary loopback translation for that frame; a provider 409 (a restart, a
+lost baseline) keeps the documented contract and Codex retries the full
+request. Native models can take the same upstream transport opt-in via
+`MODEL_ROUTER_NATIVE_TRANSPORT=websocket`, pooled per credential, with
+automatic HTTP fallback. HTTP request bodies may
 use Zstandard, gzip, deflate, or Brotli; the router safely decompresses them
 before inspecting the model ID.
 

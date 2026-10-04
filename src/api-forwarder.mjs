@@ -106,6 +106,7 @@ import {
   wsTransportAvailable,
 } from "./responses-ws-client.mjs";
 import { providerPoolRegistry } from "./provider-ws-pool.mjs";
+import { handleProviderRelayUpgrade } from "./responses-ws-relay.mjs";
 import { providerTransportError } from "./transport-failure.mjs";
 import {
   endpointCapabilityError,
@@ -1840,18 +1841,17 @@ async function acquireGenericWebSocketResponses(normalized, controller) {
   try {
     lease = await genericProviderPools.poolFor(providerId).acquire(controller.signal);
   } catch (error) {
-    if (error instanceof WsUpgradeRefusedError || error?.fallbackToHttp) {
-      markWsTransportFailure(genericWsBreakerKey(providerId));
-      console.warn(
-        "[api-forwarder] websocket transport unavailable provider=%s%s; using HTTP",
-        providerId,
-        error instanceof WsUpgradeRefusedError && error.status !== undefined
-          ? ` upgrade_status=${error.status}`
-          : "",
-      );
-      return undefined;
-    }
-    throw error;
+    // Nothing left the machine yet: a refused upgrade, an unreachable host,
+    // or a full pool all mean this turn belongs on the HTTP path below.
+    markWsTransportFailure(genericWsBreakerKey(providerId));
+    console.warn(
+      "[api-forwarder] websocket transport unavailable provider=%s%s; using HTTP",
+      providerId,
+      error instanceof WsUpgradeRefusedError && error.status !== undefined
+        ? ` upgrade_status=${error.status}`
+        : "",
+    );
+    return undefined;
   }
   const abandon = () => {
     lease.connection.abort();
@@ -2366,6 +2366,25 @@ const server = http.createServer((request, response) => {
 });
 
 applyKeepAliveTimeouts(server);
+// The router edge's relay hop: one upgrade per downstream Codex socket whose
+// turns ride a websocket-transport provider. Authenticated with the same
+// internal key as the HTTP routes.
+server.on("upgrade", (request, socket, head) => {
+  handleProviderRelayUpgrade(request, socket, head, {
+    internalKey: INTERNAL_KEY,
+    poolFor: (providerId) => {
+      // Only enabled websocket-transport providers resolve a pool; anything
+      // else answers 404 before the upgrade completes. The pool's connect
+      // step re-resolves the confined target (origin pin, DNS, credential)
+      // on every new upstream connection.
+      const provider = RUNTIME_PROVIDERS.get(providerId);
+      if (!provider || provider.generic !== true || provider.transport !== "websocket") {
+        return undefined;
+      }
+      return genericProviderPools.poolFor(providerId);
+    },
+  });
+});
 reportListenFailure(server, { label: "api-forwarder", host: LISTEN_HOST, port: LISTEN_PORT });
 server.listen(LISTEN_PORT, LISTEN_HOST, () => {
   console.error("[api-forwarder] listening");

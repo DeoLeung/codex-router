@@ -2383,6 +2383,21 @@ purpose.
    discount pasted image JSON, tool schemas, or unknown content shapes. The
    estimate must not mutate or upload the caller's image data.
 
+## Upstream Responses WebSocket transport
+
+Providers that speak the `responses_websockets=2026-02-06` protocol can carry
+turns over persistent pooled connections instead of one HTTPS POST per turn.
+Two env knobs exist: `MODEL_ROUTER_NATIVE_TRANSPORT` /
+`CODEX_ROUTER_NATIVE_TRANSPORT` (`websocket` to enable for native models,
+default `http`) and `MODEL_ROUTER_WS_PRELUDE_TIMEOUT_MS` /
+`CODEX_ROUTER_WS_PRELUDE_TIMEOUT_MS` (how long a silent upstream may take to
+produce the first frame, default 60s). The transport self-disables while a
+proxy is in effect (the hand-rolled socket has no EnvHttpProxyAgent beneath
+it), and any failure before the frame is sent falls back to the HTTP path with
+a circuit breaker, so a provider without the protocol costs one handshake per
+window, not a turn. WS pings do not reset Codex's five-minute idle timer; only
+response events do.
+
 ## A silent Grok stream is kept alive, never replayed
 
 Grok OAuth can reason for minutes with nothing to send, and every layer between

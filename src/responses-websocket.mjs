@@ -8,6 +8,7 @@ import {
   readResponseBody,
 } from "./http-utils.mjs";
 import { HeaderlessSseDetector } from "./sse-prefix.mjs";
+import { sendFrameCollectFrames } from "./responses-ws-client.mjs";
 import {
   MAX_FRAGMENT_FRAMES,
   RESPONSES_WEBSOCKET_BETA,
@@ -698,6 +699,8 @@ class ResponsesWebSocketPeer {
     this.parser.stop();
     this.abortController.abort(new Error("Responses WebSocket closed."));
     this.continuations.clear();
+    for (const hop of this.hopClients?.values() ?? []) hop.abort();
+    this.hopClients?.clear();
   }
 
   send(opcode, payload) {
@@ -743,6 +746,123 @@ class ResponsesWebSocketPeer {
     }
     this.socket.end();
     this.abort();
+  }
+
+  async relayRequestTurn({ request, fullRequest, previousId, clientMetadata, controller }) {
+    const relay = this.options.relayTransport;
+    const route = relay.resolveRoute?.(request.model);
+    if (!route) return false;
+    const previous = previousId ? this.continuations.get(previousId) : undefined;
+    // Local-origin baselines (the prewarm id) were never seen upstream: expand
+    // into the full frame. Upstream-origin ids are forwarded verbatim -- that
+    // is the incremental win this path exists for.
+    let frame;
+    let frameInput;
+    if (previousId && previous?.origin !== "upstream") {
+      frame = { type: "response.create", ...fullRequest };
+      frameInput = fullRequest.input;
+    } else {
+      frame = { ...request };
+      frameInput = [
+        ...(previous?.input ?? []),
+        ...(previous?.output ?? []),
+        ...request.input,
+      ];
+      // Mirror loopbackHeaders: a frame that omitted the sticky turn state
+      // inherits it while the turn id still matches.
+      const metadataObject_ = clientMetadata && typeof clientMetadata === "object" ? clientMetadata : {};
+      if (
+        this.turnState?.value &&
+        metadataObject_["x-codex-turn-state"] === undefined &&
+        metadataTurnId(clientMetadata) === this.turnState.turnId
+      ) {
+        frame.client_metadata = { ...metadataObject_, "x-codex-turn-state": this.turnState.value };
+      }
+    }
+    this.hopClients ??= new Map();
+    let hop = this.hopClients.get(route.providerId);
+    if (!hop || hop.closed) {
+      try {
+        hop = await relay.connectHop(route.providerId, controller.signal);
+      } catch {
+        return false;
+      }
+      this.hopClients.set(route.providerId, hop);
+      hop.onClose = () => this.hopClients?.delete(route.providerId);
+    }
+    const startedAt = Date.now();
+    const outputItems = [];
+    let outputItemsBytes = 0;
+    let continuationOverflow = false;
+    let relayTurnState;
+    let completed;
+    let terminalFailure = false;
+    let failureStatus = 502;
+    let chain = Promise.resolve();
+    try {
+      await sendFrameCollectFrames(hop, frame, {
+        signal: controller.signal,
+        onFrame: (value) => {
+          chain = chain.then(() => this.sendJsonWithBackpressure(value));
+          const turnStateHeader = safeHeaderValue(value?.headers?.["x-codex-turn-state"]);
+          if (turnStateHeader) relayTurnState = turnStateHeader;
+          if (value?.type === "response.output_item.done" && value.item) {
+            const itemBytes = Buffer.byteLength(JSON.stringify(value.item), "utf8");
+            if (outputItemsBytes + itemBytes <= this.options.maxContinuationBytes) {
+              outputItems.push(value.item);
+              outputItemsBytes += itemBytes;
+            } else {
+              continuationOverflow = true;
+            }
+          }
+          if (value?.type === "response.completed") completed = value.response;
+          if (value?.type === "error") {
+            terminalFailure = true;
+            failureStatus = Number.isInteger(value.status) ? value.status : 502;
+          }
+          if (["response.failed", "response.incomplete"].includes(value?.type)) terminalFailure = true;
+        },
+      });
+      await chain;
+      if (relayTurnState) {
+        this.turnState = { value: relayTurnState, turnId: metadataTurnId(clientMetadata) };
+      }
+      if (completed?.id && !terminalFailure) {
+        const output = reconciledContinuationOutput(completed.output, outputItems);
+        this.continuations.clear();
+        const continuation = !continuationOverflow
+          ? continuationState(frameInput, output, this.options.maxContinuationBytes)
+          : undefined;
+        if (continuation) {
+          this.continuations.set(completed.id, { ...continuation, origin: "upstream" });
+        }
+      }
+      relay.recordUsage?.({
+        model: request.model,
+        provider: route.providerId,
+        status: terminalFailure ? failureStatus : 200,
+        durationMs: Date.now() - startedAt,
+        usage: completed?.usage,
+      });
+      return true;
+    } catch {
+      // The frame already left for the provider; retrying it here could run
+      // the turn twice. Surface a 502 and let Codex's own retry contract --
+      // full request, fresh state -- handle recovery.
+      await chain.catch(() => {});
+      this.sendError(502, {
+        type: "local_router_stream_failed",
+        message: "The provider WebSocket relay ended before response.completed.",
+      });
+      relay.recordUsage?.({
+        model: request.model,
+        provider: route.providerId,
+        status: 502,
+        durationMs: Date.now() - startedAt,
+        usage: undefined,
+      });
+      return true;
+    }
   }
 
   enqueue(text) {
@@ -842,7 +962,7 @@ class ResponsesWebSocketPeer {
     if (request.generate === false) {
       const responseId = `resp_router_prewarm_${randomUUID().replaceAll("-", "")}`;
       this.continuations.clear();
-      this.continuations.set(responseId, { input: fullRequest.input, output: [] });
+      this.continuations.set(responseId, { input: fullRequest.input, output: [], origin: "local" });
       await this.sendJsonWithBackpressure({
         type: "response.created",
         response: { id: responseId },
@@ -860,6 +980,23 @@ class ResponsesWebSocketPeer {
     const controller = new AbortController();
     const onClose = () => controller.abort(this.abortController.signal.reason);
     this.abortController.signal.addEventListener("abort", onClose, { once: true });
+
+    // A frame whose model rides a websocket-transport provider relays the
+    // protocol itself through the forwarder's hop instead of being translated
+    // into the loopback HTTP POST: an incremental turn stays incremental end
+    // to end, and the provider holds the conversation state. A hop that
+    // cannot be opened falls back to the ordinary path below.
+    if (this.options.relayTransport && request.generate !== false) {
+      const relayed = await this.relayRequestTurn({
+        request,
+        fullRequest,
+        previousId,
+        clientMetadata,
+        controller,
+      });
+      if (relayed) return;
+    }
+
     let upstream;
     try {
       upstream = await this.options.fetchImpl(this.options.responsesUrl, {
@@ -962,7 +1099,7 @@ class ResponsesWebSocketPeer {
           completedResponse.output,
           this.options.maxContinuationBytes,
         );
-        if (continuation) this.continuations.set(completedResponse.id, continuation);
+        if (continuation) this.continuations.set(completedResponse.id, { ...continuation, origin: "local" });
         return;
       }
       if (!(await sendSuccessfulResponseHeaders(this, upstream))) return;
@@ -1037,7 +1174,7 @@ class ResponsesWebSocketPeer {
             this.options.maxContinuationBytes,
           )
           : undefined;
-        if (continuation) this.continuations.set(completed.id, continuation);
+        if (continuation) this.continuations.set(completed.id, { ...continuation, origin: "local" });
       } else if (!terminalFailure && !this.closed) {
         this.sendError(502, {
           type: "local_router_stream_failed",
@@ -1073,6 +1210,7 @@ export function handleResponsesWebSocketUpgrade(
     maxErrorBytes = MAX_BUFFERED_RESPONSE_BYTES,
     maxContinuationBytes = maxMessageBytes,
     maxFragmentFrames = MAX_FRAGMENT_FRAMES,
+    relayTransport,
   },
 ) {
   maxMessageBytes = Number.isFinite(maxMessageBytes) && maxMessageBytes > 0
@@ -1158,6 +1296,7 @@ export function handleResponsesWebSocketUpgrade(
     maxErrorBytes,
     maxContinuationBytes,
     maxFragmentFrames,
+    relayTransport,
   }).start(head);
   return true;
 }
