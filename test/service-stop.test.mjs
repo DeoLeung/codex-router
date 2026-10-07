@@ -67,6 +67,7 @@ async function run(command, mode, { missingTask = false, queryFailure = false, r
     protectPrivateFile: () => {},
     providerApiKeyServiceEnvironment: () => ({}), serviceZaiCodingStreamEnvironment: () => ({}),
     serviceProxyEnvironment: () => ({}), serviceGrokPatchHookEnvironment: () => ({}), serviceStartupTimeoutEnvironment: () => ({}),
+    serviceStartupBackoffEnvironment: () => ({}), resetStartupAttempts: () => true,
     assertServiceWriteIsolated: () => {}, skipServiceManagerCall: () => false,
     windowsScheduledTaskState: async () => undefined,
     existsSync: () => true, mkdirSync: () => {}, renameSync: () => {},

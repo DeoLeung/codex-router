@@ -24,6 +24,7 @@ import { providerApiKeyServiceEnvironment } from "./provider-api-key-service-env
 import { serviceZaiCodingStreamEnvironment } from "./zai-stream-timeouts.mjs";
 import { serviceProxyEnvironment } from "./proxy-environment.mjs";
 import { serviceGrokPatchHookEnvironment } from "./grok-patch-hook-settings.mjs";
+import { resetStartupAttempts, serviceStartupBackoffEnvironment } from "./startup-attempts.mjs";
 import {
   skipServiceManagerCall,
   assertServiceWriteIsolated,
@@ -91,6 +92,7 @@ function environmentEntries() {
     ...serviceGrokPatchHookEnvironment(),
     ...providerApiKeyServiceEnvironment(),
     ...serviceZaiCodingStreamEnvironment(),
+    ...serviceStartupBackoffEnvironment(),
     ...(process.env.CODEX_ROUTER_SOURCE_ROOT
       ? { CODEX_ROUTER_SOURCE_ROOT: SOURCE_ROOT }
       : {}),
@@ -155,7 +157,7 @@ function run(args, options = {}) {
   }
   return execFileSync(launchctl, args, {
     encoding: "utf8",
-    timeout: 15_000,
+    timeout: options.timeout ?? 15_000,
     stdio: options.quiet
       ? ["ignore", "ignore", "ignore"]
       : ["ignore", "pipe", "pipe"],
@@ -163,11 +165,19 @@ function run(args, options = {}) {
 }
 
 function loaded(targetService = service) {
+  return probeLoaded(targetService).description;
+}
+
+function probeLoaded(targetService = service, timeout = 15_000) {
   try {
-    const description = run(["print", targetService]);
-    return /(?:state|path|type) =/.test(description) ? description : undefined;
-  } catch {
-    return undefined;
+    const description = run(["print", targetService], { timeout });
+    return /(?:state|path|type) =/.test(description)
+      ? { state: "loaded", description }
+      : { state: "unknown" };
+  } catch (error) {
+    // launchctl's answered "Could not find specified service" status. Denied,
+    // timed-out and malformed queries never establish absence.
+    return error?.status === 113 ? { state: "absent" } : { state: "unknown", error };
   }
 }
 
@@ -175,21 +185,29 @@ function bootout(targetService = service) {
   // Before `loaded`, not after: the loop below polls until the job is gone,
   // and the job it would see is this machine's own.
   if (skipServiceManagerCall({ hostManaged: HOST_MANAGED })) return;
-  const description = loaded(targetService);
-  if (!description) return;
+  const deadline = Date.now() + 10_000;
+  const remaining = () => Math.max(1, deadline - Date.now());
+  const refusal = (cause) => {
+    const error = new Error("The launchd service stop could not be verified; no replacement was launched.", { cause });
+    error.code = "SERVICE_STOP_UNVERIFIED";
+    return error;
+  };
+  const before = probeLoaded(targetService, remaining());
+  if (before.state === "absent") return;
+  if (before.state === "unknown" || Date.now() >= deadline) throw refusal(before.error);
   try {
-    run(["bootout", targetService], { quiet: true });
+    run(["bootout", targetService], { quiet: true, timeout: remaining() });
   } catch (error) {
-    if (loaded(targetService)) throw error;
-    return;
+    if (Date.now() < deadline && probeLoaded(targetService, remaining()).state === "absent") return;
+    throw refusal(error);
   }
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (!loaded(targetService)) return;
-    Atomics.wait(launchctlRetryWait, 0, 0, 100);
+  while (Date.now() < deadline) {
+    const after = probeLoaded(targetService, remaining());
+    if (after.state === "absent") return;
+    if (after.state === "unknown") throw refusal(after.error);
+    Atomics.wait(launchctlRetryWait, 0, 0, Math.min(100, Math.max(0, deadline - Date.now())));
   }
-  if (loaded(targetService)) {
-    throw new Error(`Timed out waiting for ${targetService} to stop.`);
-  }
+  throw refusal(new Error(`Timed out waiting for ${targetService} to stop.`));
 }
 
 const guardPlistWrite = () => assertServiceWriteIsolated(LAUNCH_AGENT_PATH, {
@@ -259,6 +277,7 @@ if (command === "render") {
   // predicate.
   guardPlistWrite();
   bootout();
+  resetStartupAttempts({ required: false });
   // Only safe here. launchd opens StandardOutPath before it execs the service,
   // so a rotation performed by the started process renames a file the process
   // already holds a descriptor on: it keeps appending to the renamed inode and
@@ -285,13 +304,14 @@ if (command === "render") {
   bootout();
   process.stdout.write(`${JSON.stringify({ state: "stopped" })}\n`);
 } else if (command === "start") {
-  if (!loaded()) bootstrap();
+  resetStartupAttempts();
+  const state = probeLoaded();
+  if (state.state === "unknown") throw new Error("The launchd service state could not be verified; no launcher was started.");
+  if (state.state === "absent") bootstrap();
   process.stdout.write(`${JSON.stringify({ state: "running" })}\n`);
 } else if (command === "restart") {
-  if (loaded()) {
-    run(["kickstart", "-k", service], { quiet: true });
-  } else {
-    bootstrap();
-  }
+  bootout();
+  resetStartupAttempts();
+  bootstrap();
   process.stdout.write(`${JSON.stringify({ state: "running" })}\n`);
 }

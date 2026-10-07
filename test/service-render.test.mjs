@@ -546,7 +546,7 @@ test("Windows explicit stop disables heartbeat while start and restart re-enable
   );
   assert.match(
     source,
-    /if \(command === "restart"\) endTask\(\);[\s\S]*?setTaskEnabled\(true\);[\s\S]*?schtasks\(\["\/Run"/,
+    /if \(command === "restart"\) \{\s*endTask\(\);\s*resetStartupAttempts\(\);\s*\}[\s\S]*?setTaskEnabled\(true\);[\s\S]*?schtasks\(\["\/Run"/,
   );
 });
 
@@ -1274,3 +1274,25 @@ test(
     }
   },
 );
+
+test("all service definitions persist only valid startup cooldown settings", () => {
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "startup-backoff-render-"));
+  try {
+    for (const [platform, script] of [["darwin", "service-macos.mjs"], ["linux", "service-linux.mjs"], ["win32", "service-windows.mjs"]]) {
+      for (const setting of [undefined, "0", "1", "true", "1\nINJECT=value"]) {
+        const output = serviceCommand(script, platform, testRoot, "render", "codex", root, { CODEX_ROUTER_DISABLE_STARTUP_BACKOFF: setting });
+        const valid = setting === "0" || setting === "1";
+        assert.equal(output.includes("CODEX_ROUTER_DISABLE_STARTUP_BACKOFF"), valid, `${platform}: ${setting}`);
+        assert.doesNotMatch(output, /INJECT=value/);
+        if (valid) {
+          const expected = platform === "darwin"
+            ? `<key>CODEX_ROUTER_DISABLE_STARTUP_BACKOFF</key>\n    <string>${setting}</string>`
+            : platform === "linux"
+              ? `Environment="CODEX_ROUTER_DISABLE_STARTUP_BACKOFF=${setting}"`
+              : `set "CODEX_ROUTER_DISABLE_STARTUP_BACKOFF=${setting}"`;
+          assert.ok(output.includes(expected), platform);
+        }
+      }
+    }
+  } finally { rmSync(testRoot, { recursive: true, force: true }); }
+});

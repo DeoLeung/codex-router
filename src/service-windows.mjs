@@ -28,6 +28,7 @@ import { serviceZaiCodingStreamEnvironment } from "./zai-stream-timeouts.mjs";
 import { serviceProxyEnvironment } from "./proxy-environment.mjs";
 import { serviceGrokPatchHookEnvironment } from "./grok-patch-hook-settings.mjs";
 import { serviceStartupTimeoutEnvironment } from "./startup-timeout.mjs";
+import { resetStartupAttempts, serviceStartupBackoffEnvironment } from "./startup-attempts.mjs";
 import {
   skipServiceManagerCall,
   assertServiceWriteIsolated,
@@ -92,6 +93,7 @@ function wrapper() {
     ...providerApiKeyServiceEnvironment(),
     ...serviceZaiCodingStreamEnvironment(),
     ...serviceStartupTimeoutEnvironment(),
+    ...serviceStartupBackoffEnvironment(),
     // The LiteLLM gateway is a Python process. Force UTF-8 output so its
     // startup banner and logs do not crash on Windows systems whose default
     // ANSI/OEM code page is not UTF-8 (e.g. Russian cp1251), where Python
@@ -561,6 +563,7 @@ if (command === "render") {
     // hidden run — the console window would survive until the next logon.
     endTask();
     stopVerified = true;
+    resetStartupAttempts({ required: false });
     installTask();
     schtasks(["/Run", "/TN", taskName], { quiet: true, mutating: true });
   } catch (error) {
@@ -578,6 +581,7 @@ if (command === "render") {
     // reintroduce the very defect this launcher exists to fix.
     try {
       if (stopVerified && taskExists()) {
+        resetStartupAttempts({ required: false });
         setTaskEnabled(true);
         schtasks(["/Run", "/TN", taskName], { quiet: true, mutating: true });
       }
@@ -673,6 +677,7 @@ if (command === "render") {
   // verb quietly perform an install -- the asymmetry the "stop and start act
   // on the same layer" rule exists to prevent. So name the task, say it is not
   // registered, and point at the command that registers it.
+  resetStartupAttempts();
   if (!taskExists({ strict: command === "restart" && !skipServiceManagerCall({ hostManaged: HOST_MANAGED }) })) {
     console.error(
       `The "${taskName}" scheduled task is not registered, so there is nothing to ${command}. `
@@ -682,7 +687,10 @@ if (command === "render") {
     // exitCode, not exit(): stdout is asynchronous for a Windows console.
     process.exitCode = 1;
   } else {
-    if (command === "restart") endTask();
+    if (command === "restart") {
+      endTask();
+      resetStartupAttempts();
+    }
     setTaskEnabled(true);
     schtasks(["/Run", "/TN", taskName], { quiet: true, mutating: true });
     process.stdout.write(`${JSON.stringify({ state: "running" })}\n`);
