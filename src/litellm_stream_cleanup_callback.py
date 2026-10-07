@@ -1,6 +1,6 @@
 """Close acquired Chat-to-Responses streams when the gateway cancels a turn.
 
-LiteLLM 1.96.0's outer iterator owns cleanup, but its completion bridge lacks
+LiteLLM 1.96.2's outer iterator owns cleanup, but its completion bridge lacks
 aclose. Delegate to the existing CustomStreamWrapper: it clears the acquired
 stream before awaiting and shields SDK HTTP-stream closure from ASGI task-group
 cancellation. No response bytes, retry policy, or upstream request are changed.
@@ -21,7 +21,7 @@ def install_stream_cleanup():
     # A future upstream or operator-supplied method keeps ownership of cleanup.
     if hasattr(LiteLLMCompletionStreamingIterator, "aclose"):
         return False
-    if version("litellm") != "1.96.0":
+    if version("litellm") != "1.96.2":
         raise RuntimeError(
             "Review stream cleanup compatibility before upgrading LiteLLM."
         )
