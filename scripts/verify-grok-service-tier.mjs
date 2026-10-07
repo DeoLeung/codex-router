@@ -54,14 +54,17 @@ forwarder.stderr.on("data", chunk => { errors = (errors + chunk).slice(-8000); }
 const gatewayPort = await openPort();
 const routerPort = await openPort();
 const configPath = path.join(temp, "litellm.yaml");
-assert.match(renderLiteLlmConfig(), /callbacks: \[grok_service_tier_callback.grok_service_tier_callback\]/);
-writeFileSync(path.join(temp, "grok_service_tier_callback.py"), readFileSync(path.join(root, "src/grok_service_tier_callback.py")));
+const callbacks = ["grok_service_tier_callback.grok_service_tier_callback", "litellm_stream_cleanup_callback.stream_cleanup_callback"];
+assert.ok(renderLiteLlmConfig().includes(`callbacks: [${callbacks.join(", ")}]`));
+for (const name of ["grok_service_tier_callback.py", "litellm_stream_cleanup_callback.py"]) {
+  writeFileSync(path.join(temp, name), readFileSync(path.join(root, "src", name)), { mode: 0o600 });
+}
 writeFileSync(configPath, JSON.stringify({
   model_list: ["grok-4.6", "grok-4.5"].map(model => ({
     model_name: `grok-oauth-${model.replaceAll(".", "-")}`,
     litellm_params: { model: `openai/${model}`, api_base: `http://127.0.0.1:${port}/v1`, api_key: key, use_chat_completions_api: true },
   })),
-  litellm_settings: { drop_params: true, callbacks: ["grok_service_tier_callback.grok_service_tier_callback"] },
+  litellm_settings: { drop_params: true, callbacks },
   general_settings: { master_key: key, disable_spend_logs: true },
 }));
 const processErrors = new Map();
