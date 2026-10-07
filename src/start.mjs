@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeSync } from "node:fs";
 import path from "node:path";
 
 import { assertCallerSecret } from "./caller-auth.mjs";
@@ -28,13 +28,22 @@ import { antigravityOAuthStartupState } from "./antigravity-oauth-status.mjs";
 import { attemptAntigravityProbePromotionAfterReadiness } from "./antigravity-probe-activation.mjs";
 import { spawnableCommand } from "./spawnable-command.mjs";
 import { ensureOllamaHeadless } from "./ollama-runtime.mjs";
-import { venvRuntimeProblem } from "./venv-runtime.mjs";
+import { venvRuntimeOutcome } from "./venv-runtime.mjs";
 import { dependencyRepairHint } from "./dependency-repair.mjs";
 import {
   clearServiceProcessState,
+  isForegroundSupervisor,
   shouldRecordServiceProcess,
   writeServiceProcessState,
 } from "./service-process.mjs";
+import {
+  STARTUP_BACKOFF_EXIT_CODE,
+  clearStartupAttempts,
+  readStartupAttempts,
+  recordStartupFailure,
+  startupBackoffDisabled,
+  startupBackoffRemainingMs,
+} from "./startup-attempts.mjs";
 import {
   environmentProxyOptedIn,
   inheritedProxyEnvironment,
@@ -44,6 +53,26 @@ import { antigravityOAuthStatus } from "./antigravity-oauth-status.mjs";
 import { cursorTunnelRunSpec } from "./cursor-cloudflare-tunnel.mjs";
 import { pruneUnconfiguredProviders } from "./provider-selection.mjs";
 import { targetCli } from "./target-integration.mjs";
+
+// The foreground entry marks itself before importing this module. Direct
+// start.mjs remains the OS payload; only it consumes managed retry state.
+const automaticStartup = !isForegroundSupervisor();
+let startupReady = false;
+if (automaticStartup && !startupBackoffDisabled()) {
+  const backoffRecord = readStartupAttempts();
+  const backoffRemaining = startupBackoffRemainingMs(backoffRecord);
+  if (backoffRemaining > 0) {
+    // Written synchronously on purpose: process.exit() does not flush an
+    // asynchronous stream, and this message is the entire point of the exit.
+    writeSync(
+      2,
+      `[model-router] backing off for another ${Math.ceil(backoffRemaining / 1000)}s after ` +
+        `${backoffRecord?.consecutiveFailures ?? 0} consecutive failed start(s); ` +
+        "`service restart` clears this, and CODEX_ROUTER_DISABLE_STARTUP_BACKOFF=1 bypasses it.\n",
+    );
+    process.exit(STARTUP_BACKOFF_EXIT_CODE);
+  }
+}
 
 // Before anything reads the environment or spawns a child. A service manager
 // hands this process the proxy the install recorded; a shell hands it whatever
@@ -110,10 +139,13 @@ if (usesBundledVenv) {
     process.platform === "win32" ? "Scripts" : "bin",
     process.platform === "win32" ? "python.exe" : "python",
   );
-  const venvProblem = venvRuntimeProblem(venvPython);
-  if (venvProblem) {
+  const venvOutcome = venvRuntimeOutcome(venvPython);
+  if (venvOutcome.kind !== "ok") {
+    if (automaticStartup && !startupBackoffDisabled() && venvOutcome.kind === "timeout") {
+      recordStartupFailure({ reason: "venv-timeout" });
+    }
     throw new Error(
-      `The LiteLLM virtual environment is broken at ${venvPython} (${venvProblem}). ` +
+      `The LiteLLM virtual environment ${venvOutcome.kind === "timeout" ? "probe did not finish" : "is broken"} at ${venvPython} (${venvOutcome.message}). ` +
         `${dependencyFix}.`,
     );
   }
@@ -497,6 +529,16 @@ async function main() {
     : undefined;
 
   console.error(`[${frontendService}] ready (authenticated loopback endpoint)`);
+  startupReady = true;
+  // The service is serving, so the previous failures are over: clear the
+  // back-off record rather than leaving it to delay the next legitimate start.
+  if (automaticStartup) {
+    try {
+      clearStartupAttempts();
+    } catch {
+      // The operational cache must not interrupt a healthy stack.
+    }
+  }
   // Only the gateway is supervised. The forwarders and the router are ours and
   // are restarted by rebuilding the whole service; the gateway is a third-party
   // Python process that can end itself on a single bad upstream response
@@ -562,6 +604,18 @@ try {
   if (!shuttingDown) {
     const reason = (error instanceof Error && error.message) || String(error);
     console.error(`[model-router] startup failed: ${reason}; inspect the service logs above for details.`);
+    if (automaticStartup && !startupReady && !startupBackoffDisabled()) {
+      // Do not infer policy from an error message or from try-block placement.
+      // Configuration, credentials, child exit and file/ACL errors stay fatal.
+      const failure = error?.probeOutcome === "timeout"
+        ? "health-timeout"
+        : error?.serviceProcessFailure === "identity-unavailable"
+          ? "process-identity-unavailable"
+          : error?.serviceProcessFailure === "command-line-unavailable"
+            ? "process-command-line-unavailable"
+            : undefined;
+      if (failure) recordStartupFailure({ reason: failure });
+    }
     exitCode = 1;
   }
 } finally {

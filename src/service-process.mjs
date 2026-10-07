@@ -46,6 +46,10 @@ export function markForegroundSupervisor() {
   foregroundSupervisor = true;
 }
 
+export function isForegroundSupervisor() {
+  return foregroundSupervisor;
+}
+
 export function shouldRecordServiceProcess({
   platform = process.platform,
   foreground = foregroundSupervisor,
@@ -107,10 +111,12 @@ export function writeServiceProcessState(options = {}) {
     },
   });
   if (!probe.state) {
-    throw new Error(
+    const error = new Error(
       "The Windows service could not verify its own start.mjs process identity; "
         + `refusing to run without a stoppable process record (${probe.failure}).`,
     );
+    error.serviceProcessFailure = probe.failure;
+    throw error;
   }
   const state = probe.state;
   writePrivateJson(options.statePath || SERVICE_PROCESS_STATE_PATH, state, {
