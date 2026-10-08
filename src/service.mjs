@@ -8,6 +8,7 @@ import { stopManagedOllama } from "./ollama-runtime.mjs";
 import { waitForServiceReadiness } from "./service-readiness.mjs";
 import { withServiceOperationLock } from "./service-operation-lock.mjs";
 import { environmentProxyOptedIn } from "./proxy-environment.mjs";
+import { serviceAppConnectorEnvironment } from "./app-connector-policy.mjs";
 
 const platform = process.env.CODEX_ROUTER_SERVICE_PLATFORM || process.platform;
 const script = {
@@ -59,6 +60,9 @@ export async function runServiceCommandUnlocked(
   command = "status",
   args = [command],
 ) {
+  // Refuse invalid publication settings before resetting state or starting a
+  // platform installer that may replace a working service.
+  if (command === "install") serviceAppConnectorEnvironment();
   // The wrapper below is a separate Node process, so a direct
   // `node --use-env-proxy src/service.mjs ...` invocation would otherwise lose
   // its CLI-only opt-in before the platform renderer can persist it.
@@ -177,6 +181,8 @@ export async function runServiceCommandUnlocked(
 export async function runServiceCli(args = process.argv.slice(2)) {
   const command = args[0] || "status";
   const commandArgs = args.length ? args : [command];
+  // The operation lock writes private state, so preflight before acquiring it.
+  if (command === "install") serviceAppConnectorEnvironment();
   return mutatingCommands.has(command)
     ? withServiceOperationLock(() => runServiceCommandUnlocked(command, commandArgs))
     : runServiceCommandUnlocked(command, commandArgs);

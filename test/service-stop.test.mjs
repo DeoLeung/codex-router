@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { serviceAppConnectorEnvironment } from "../src/app-connector-policy.mjs";
 
 // Execute the complete lifecycle command and its ownership module with only
 // OS, filesystem, scheduler and clock dependencies replaced. Unlike PATH
@@ -67,6 +68,7 @@ async function run(command, mode, { missingTask = false, queryFailure = false, r
     protectPrivateFile: () => {},
     providerApiKeyServiceEnvironment: () => ({}), serviceZaiCodingStreamEnvironment: () => ({}),
     serviceProxyEnvironment: () => ({}), serviceGrokPatchHookEnvironment: () => ({}), serviceStartupTimeoutEnvironment: () => ({}),
+    serviceAppConnectorEnvironment: (environment = processObject.env) => serviceAppConnectorEnvironment(environment),
     serviceStartupBackoffEnvironment: () => ({}), resetStartupAttempts: () => true,
     assertServiceWriteIsolated: () => {}, skipServiceManagerCall: () => false,
     windowsScheduledTaskState: async () => undefined,

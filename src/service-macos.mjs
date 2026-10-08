@@ -23,6 +23,7 @@ import {
 import { providerApiKeyServiceEnvironment } from "./provider-api-key-service-environment.mjs";
 import { serviceZaiCodingStreamEnvironment } from "./zai-stream-timeouts.mjs";
 import { serviceProxyEnvironment } from "./proxy-environment.mjs";
+import { serviceAppConnectorEnvironment } from "./app-connector-policy.mjs";
 import { serviceGrokPatchHookEnvironment } from "./grok-patch-hook-settings.mjs";
 import { resetStartupAttempts, serviceStartupBackoffEnvironment } from "./startup-attempts.mjs";
 import {
@@ -89,6 +90,7 @@ function environmentEntries() {
     CODEX_ROUTER_PORT: String(PORTS.router),
     CODEX_ROUTER_API_PORT: String(PORTS.api),
     ...serviceProxyEnvironment(),
+    ...serviceAppConnectorEnvironment(),
     ...serviceGrokPatchHookEnvironment(),
     ...providerApiKeyServiceEnvironment(),
     ...serviceZaiCodingStreamEnvironment(),
@@ -271,6 +273,7 @@ if (command === "render") {
     })}\n`,
   );
 } else if (command === "install") {
+  serviceAppConnectorEnvironment();
   // Before anything, including the bootout below: an install that is going to
   // be refused for writing outside its fixture must not first unload the
   // machine's running service. writePlist re-checks; the guard is a pure

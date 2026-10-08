@@ -23,6 +23,7 @@ import {
 import { providerApiKeyServiceEnvironment } from "./provider-api-key-service-environment.mjs";
 import { serviceZaiCodingStreamEnvironment } from "./zai-stream-timeouts.mjs";
 import { serviceProxyEnvironment } from "./proxy-environment.mjs";
+import { serviceAppConnectorEnvironment } from "./app-connector-policy.mjs";
 import { serviceGrokPatchHookEnvironment } from "./grok-patch-hook-settings.mjs";
 import { resetStartupAttempts, serviceStartupBackoffEnvironment } from "./startup-attempts.mjs";
 import {
@@ -83,6 +84,7 @@ function unit() {
     CODEX_ROUTER_PORT: String(PORTS.router),
     CODEX_ROUTER_API_PORT: String(PORTS.api),
     ...serviceProxyEnvironment(),
+    ...serviceAppConnectorEnvironment(),
     ...serviceGrokPatchHookEnvironment(),
     ...providerApiKeyServiceEnvironment(),
     ...serviceZaiCodingStreamEnvironment(),
@@ -172,6 +174,7 @@ if (!new Set(["install", "uninstall", "start", "stop", "restart", "status", "ren
 if (command === "render") {
   process.stdout.write(unit());
 } else if (command === "install") {
+  serviceAppConnectorEnvironment();
   writeUnit();
   systemctl(["daemon-reload"], { quiet: true });
   // systemd's append: opens the log before the service runs, so the started
