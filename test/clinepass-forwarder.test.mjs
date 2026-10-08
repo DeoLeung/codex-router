@@ -83,7 +83,14 @@ test("ClinePass completion envelopes are unwrapped without changing other respon
       { name: "successful envelope", body: envelope, expected: JSON.stringify(completion) },
       { name: "empty choices", body: '{"success":true,"data":{"choices":[]}}', expected: '{"choices":[]}' },
       { name: "ordinary completion", body: `  ${JSON.stringify(completion)}\n` },
-      { name: "unsuccessful envelope", body: JSON.stringify({ success: false, data: completion, error: "empty response content" }) },
+      // An HTTP 200 that Cline marks unsuccessful has no root `choices`; relayed
+      // intact, the gateway turned it into "no 'choices'" (#938). The forwarder
+      // answers with a fixed diagnosis instead, and never echoes upstream text.
+      { name: "unsuccessful envelope", body: JSON.stringify({ success: false, data: completion, error: "empty response content" }), expectedStatus: 502, expectedCode: "clinepass_empty_response" },
+      { name: "unsuccessful envelope as Cline sends it", body: '{"error":"Empty response content ","success":false}', expectedStatus: 502, expectedCode: "clinepass_empty_response" },
+      { name: "unsuccessful envelope with an unrecognized reason", body: JSON.stringify({ success: false, error: "quota for sk-live-ECHOED-SECRET exhausted" }), expectedStatus: 502, expectedCode: "clinepass_unsuccessful_response", mustNotContain: "ECHOED-SECRET" },
+      { name: "unsuccessful envelope with a non-string reason", body: JSON.stringify({ success: false, error: { message: "empty response content" } }), expectedStatus: 502, expectedCode: "clinepass_unsuccessful_response" },
+      { name: "unsuccessful flag beside root choices", body: JSON.stringify({ success: false, ...completion }) },
       { name: "non-boolean success", body: JSON.stringify({ success: "true", data: completion }) },
       { name: "missing choices", body: '{"success":true,"data":{"id":"missing"}}' },
       { name: "invalid choices", body: '{"success":true,"data":{"choices":{}}}' },
@@ -105,7 +112,14 @@ test("ClinePass completion envelopes are unwrapped without changing other respon
         const body = await response.text();
         assert.equal(response.status, entry.expectedStatus || entry.status || 200, body);
         if (entry.expectedStatus) {
-          assert.equal(JSON.parse(body).error.type, "provider_api_proxy_error");
+          const error = JSON.parse(body).error;
+          assert.equal(error.type, "provider_api_proxy_error");
+          if (entry.expectedCode) {
+            assert.equal(error.code, entry.expectedCode);
+            assert.equal(typeof error.message, "string");
+            assert.equal(requests.at(-1).body.stream, false);
+          }
+          if (entry.mustNotContain) assert.equal(body.includes(entry.mustNotContain), false, body);
           return;
         }
         assert.equal(body, entry.expected || entry.body);
@@ -117,6 +131,9 @@ test("ClinePass completion envelopes are unwrapped without changing other respon
       });
     }
     assert.equal(requests.length, cases.length, "each caller request sends exactly one upstream request");
+    // The refusal is logged by code only (the forwarder runs quiet here, so
+    // nothing at all); upstream text must never reach the service log.
+    assert.equal(stderr.includes("ECHOED-SECRET"), false, stderr);
   } finally {
     if (child.exitCode === null) {
       child.kill("SIGTERM");

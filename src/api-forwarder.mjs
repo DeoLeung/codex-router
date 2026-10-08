@@ -1617,6 +1617,30 @@ function upstreamHeaders(requestHeaders, body, apiKey, provider, extraHeaders = 
   return headers;
 }
 
+// The reasons Cline is known to put in an unsuccessful envelope, each mapped
+// to a diagnosis the router words itself. Anything else gets the generic
+// sentence: an unrecognized upstream string may echo prompt or account text.
+const CLINEPASS_REFUSALS = new Map([
+  [
+    "empty response content",
+    {
+      code: "clinepass_empty_response",
+      message:
+        "ClinePass returned no content for this non-streaming request. The same model usually answers when the request is streamed.",
+    },
+  ],
+]);
+
+function clinePassRefusal(reason) {
+  const known = typeof reason === "string"
+    ? CLINEPASS_REFUSALS.get(reason.trim().toLowerCase())
+    : undefined;
+  return known || {
+    code: "clinepass_unsuccessful_response",
+    message: "ClinePass answered with an unsuccessful response and no completion.",
+  };
+}
+
 async function relayUpstreamResponse(
   normalized,
   upstream,
@@ -1633,8 +1657,9 @@ async function relayUpstreamResponse(
   ) {
     // Cline's non-streaming API wraps successful completions in success/data.
     // LiteLLM needs choices at the root. Buffer under the shared upstream limit
-    // before committing any bytes, and leave errors or unknown shapes intact.
+    // before committing any bytes, and leave unknown shapes intact.
     let body = await readResponseBody(upstream);
+    let refusal;
     try {
       const envelope = JSON.parse(body.toString("utf8"));
       if (
@@ -1643,9 +1668,36 @@ async function relayUpstreamResponse(
         !Array.isArray(envelope.data) && Array.isArray(envelope.data.choices)
       ) {
         body = Buffer.from(JSON.stringify(envelope.data), "utf8");
+      } else if (
+        envelope && typeof envelope === "object" && !Array.isArray(envelope) &&
+        envelope.success === false && !Array.isArray(envelope.choices)
+      ) {
+        refusal = clinePassRefusal(envelope.error);
       }
     } catch {
       // Malformed JSON belongs to the upstream; relay the original bytes.
+    }
+    if (refusal) {
+      // An HTTP 200 that Cline itself marks unsuccessful carries no root
+      // `choices`, so relaying it intact only moved the failure one hop: the
+      // gateway answered 500 "provider returned a response with no 'choices'"
+      // and the real cause never reached the caller (#938). Say what happened
+      // with a gateway-shaped error instead. The message is a fixed diagnosis
+      // chosen by an allowlisted reason; no upstream text is relayed or logged.
+      recordUpstreamLimits(normalized, telemetryUpstream);
+      if (!QUIET) {
+        console.error(
+          `[api-forwarder] provider=${normalized.provider.id} model=${normalized.model.upstreamModel} status=${upstream.status} refused=${refusal.code} duration_ms=${Date.now() - startedAt}`,
+        );
+      }
+      writeJson(response, 502, {
+        error: {
+          type: "provider_api_proxy_error",
+          code: refusal.code,
+          message: refusal.message,
+        },
+      });
+      return;
     }
     upstream = new Response(body, {
       status: upstream.status,
