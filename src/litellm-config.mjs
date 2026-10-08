@@ -88,6 +88,14 @@ export function renderLiteLlmConfig() {
             `      timeout: ${grokGatewayStreamTimeoutSeconds()}`,
           ]
         : []),
+      // Cline's non-streaming endpoint can answer HTTP 200 and still declare
+      // the result unsuccessful; the API forwarder reports that as a 500.
+      // LiteLLM retries every status of 500 and above twice, so without this
+      // one prompt would reach Cline three times for a result the origin
+      // already produced. Its retry policy has no per-status knob for 5xx, so
+      // the deployment is single-shot, like the local ones above. Codex owns
+      // its own retry policy for transient failures.
+      ...(model.provider === "clinepass" ? ["      num_retries: 0"] : []),
       "",
     );
   }

@@ -1684,13 +1684,17 @@ async function relayUpstreamResponse(
       // and the real cause never reached the caller (#938). Say what happened
       // with a gateway-shaped error instead. The message is a fixed diagnosis
       // chosen by an allowlisted reason; no upstream text is relayed or logged.
+      //
+      // 500, not 502: the origin ran and answered, so this is not a failure an
+      // intermediary may repeat. The gateway would still retry any 5xx, which
+      // is why ClinePass deployments are single-shot in litellm-config.mjs.
       recordUpstreamLimits(normalized, telemetryUpstream);
       if (!QUIET) {
         console.error(
           `[api-forwarder] provider=${normalized.provider.id} model=${normalized.model.upstreamModel} status=${upstream.status} refused=${refusal.code} duration_ms=${Date.now() - startedAt}`,
         );
       }
-      writeJson(response, 502, {
+      writeJson(response, 500, {
         error: {
           type: "provider_api_proxy_error",
           code: refusal.code,

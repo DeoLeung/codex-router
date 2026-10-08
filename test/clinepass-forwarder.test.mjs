@@ -86,10 +86,11 @@ test("ClinePass completion envelopes are unwrapped without changing other respon
       // An HTTP 200 that Cline marks unsuccessful has no root `choices`; relayed
       // intact, the gateway turned it into "no 'choices'" (#938). The forwarder
       // answers with a fixed diagnosis instead, and never echoes upstream text.
-      { name: "unsuccessful envelope", body: JSON.stringify({ success: false, data: completion, error: "empty response content" }), expectedStatus: 502, expectedCode: "clinepass_empty_response" },
-      { name: "unsuccessful envelope as Cline sends it", body: '{"error":"Empty response content ","success":false}', expectedStatus: 502, expectedCode: "clinepass_empty_response" },
-      { name: "unsuccessful envelope with an unrecognized reason", body: JSON.stringify({ success: false, error: "quota for sk-live-ECHOED-SECRET exhausted" }), expectedStatus: 502, expectedCode: "clinepass_unsuccessful_response", mustNotContain: "ECHOED-SECRET" },
-      { name: "unsuccessful envelope with a non-string reason", body: JSON.stringify({ success: false, error: { message: "empty response content" } }), expectedStatus: 502, expectedCode: "clinepass_unsuccessful_response" },
+      // The status is 500 because the origin ran: not a failure to repeat.
+      { name: "unsuccessful envelope", body: JSON.stringify({ success: false, data: completion, error: "empty response content" }), expectedStatus: 500, expectedCode: "clinepass_empty_response" },
+      { name: "unsuccessful envelope as Cline sends it", body: '{"error":"Empty response content ","success":false}', expectedStatus: 500, expectedCode: "clinepass_empty_response" },
+      { name: "unsuccessful envelope with an unrecognized reason", body: JSON.stringify({ success: false, error: "quota for sk-live-ECHOED-SECRET exhausted" }), expectedStatus: 500, expectedCode: "clinepass_unsuccessful_response", mustNotContain: "ECHOED-SECRET" },
+      { name: "unsuccessful envelope with a non-string reason", body: JSON.stringify({ success: false, error: { message: "empty response content" } }), expectedStatus: 500, expectedCode: "clinepass_unsuccessful_response" },
       { name: "unsuccessful flag beside root choices", body: JSON.stringify({ success: false, ...completion }) },
       { name: "non-boolean success", body: JSON.stringify({ success: "true", data: completion }) },
       { name: "missing choices", body: '{"success":true,"data":{"id":"missing"}}' },
