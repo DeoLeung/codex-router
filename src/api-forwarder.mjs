@@ -1680,6 +1680,13 @@ async function relayUpstreamResponse(
     responsesStream
       ? createResponsesStreamTransform(flatToNative, {
           pinResponseId: normalized.provider.authProfile === "github-copilot",
+          // Not gated on QUIET: this is the only place the reason is ever
+          // written down. The gateway relays the frame as a bare "in-stream
+          // error", so without this line a refused stream cannot be diagnosed
+          // from any log (#837).
+          onInvalid: (reason) => console.error(
+            `[api-forwarder] refused Responses stream provider=${normalized.provider.id} model=${normalized.model.upstreamModel}: ${reason}`,
+          ),
         })
       : undefined,
     responsesJson ? createResponsesJsonTransform(flatToNative) : undefined,
