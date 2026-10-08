@@ -129,7 +129,7 @@ async function run({ foreground = false, disabled = false, mode = "healthy", see
         : mode === "identity-mismatch" ? "node /foreign-checkout/start.mjs" : `node ${fixturePath.join(sourceRoot, "src", "start.mjs")}`,
       processStartIdentityProbe: () => ({ state: "alive", identity: "fixture|node" }),
     },
-    "./native-catalog-drift.mjs": { watchNativeCatalog: () => {}, republishOnNativeDrift: async () => {} },
+    "./native-catalog-drift.mjs": { watchNativeCatalog: () => () => {} },
   };
   const modules = new Map();
   async function dependency(specifier) {
