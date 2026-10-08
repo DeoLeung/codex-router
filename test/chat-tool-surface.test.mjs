@@ -599,9 +599,9 @@ function deferredConnectorSurface() {
     { type: "function", name: "shell", parameters: { type: "object", properties: {} } },
     clientToolSearch(),
     {
-      // Codex registers its whole app namespace with deferLoading. The router
-      // injects this namespace's definitions itself, so the deferral rule must
-      // not take the snapshot back out.
+      // When the router supplies its own app snapshot, known definitions are
+      // eager. A client search relay instead owns discovery of these deferred
+      // client registrations.
       type: "namespace",
       name: "codex_app",
       defer_loading: true,
@@ -658,9 +658,7 @@ test("a chat route sends non-connector deferred tools when no search relay is br
     // A deferral marker outside the connector namespaces means nothing without
     // a relay to serve the search, so that definition is still sent.
     assert.ok(names.includes("codex_app__read_connector_page"));
-    // An opted-in connector is withheld on its own evidence: the live capture
-    // carries no relay and no marker, and the model cannot reach a connector it
-    // was never shown.
+    // Connector withholding applies independently of a client search relay.
     assert.ok(!names.includes("mcp__codex_apps__notion__search"));
     assert.ok(!names.includes("mcp__codex_apps__slack__post_message"));
     assert.ok(
@@ -701,12 +699,11 @@ test("a chat route re-declares a deferred connector the transcript already calle
   assert.ok(withHistory.tools.every((tool) => !("defer_loading" in tool)));
 });
 
-// The real wire shape of a fresh routed turn, captured from DeepSeek on
-// opencode-go and Union Alpha on opencode-go-messages: 38 entries, no
-// `defer_loading` on any tool, and no `tool_search` control at all. The app
-// connectors are ~900 KB of JSON Schema the model cannot reach by intent on a
-// fresh turn, and they were being flattened into the prompt of a one-word
-// message. Children carry `inputSchema`, as Codex sends them.
+// A synthetic scale fixture using namespace counts and approximate sizes
+// reported with the incoming PR. Child names and schemas are generated below;
+// it proves selection and serialized-size reduction for this fixture, not a
+// live Codex capture, token accounting or provider billing. It deliberately has
+// no deferral markers or search control, and children use `inputSchema`.
 const REAL_TURN_NAMESPACES = [
   ["collaboration", 6, 9],
   ["mcp__codex_app", 31, 31],
@@ -772,8 +769,8 @@ function realTurnSurface() {
   ];
 }
 
-// Pad each namespace to the byte size the capture recorded for it, so the
-// measured before/after is the live one rather than an invented one.
+// Pad generated schemas to the fixture's target size. These bytes are an
+// illustrative workload; they are not measurements from a live provider turn.
 function realTurnNamespace([name, children, kilobytes]) {
   const build = (padding) => ({
     type: "namespace",
@@ -835,7 +832,7 @@ test("the connector allow-list value none withholds every connector", () => {
   );
   const eagerBytes = JSON.stringify(eager.tools).length;
   const routedBytes = JSON.stringify(routed.tools).length;
-  // The captured turn reached the provider as 576 flattened tools, ~923 KB.
+  // This deterministic fixture expands to 576 tools and over 900 KiB.
   assert.equal(eager.tools.length, 576);
   assert.ok(eagerBytes > 900 * 1024, `${eagerBytes} bytes eager`);
   // What is left is the client's non-connector namespaces plus the app

@@ -193,7 +193,7 @@ function routedRequestPayload(stream = true, model = "opencode-go/deepseek-v4-fl
       },
       {
         type: "namespace",
-        name: "mcp__git_forge__github",
+        name: "mcp__codex_apps__github",
         tools: [
           {
             type: "function",
@@ -1625,7 +1625,7 @@ test("routed request flattens every namespace to the gateway and restores calls 
   assert.ok(names.includes("mcp__node_repl__js_reset"), "node_repl js_reset flattened");
   assert.ok(names.includes("tool_search"), "native tool_search exposed as a function");
   assert.ok(
-    names.includes("mcp__git_forge__github__fetch_issue"),
+    names.includes("mcp__codex_apps__github__fetch_issue"),
     "nested-namespace MCP tool flattened",
   );
   assert.ok(names.includes("exec_command"), "plain tools untouched");
@@ -1645,7 +1645,7 @@ test("routed request flattens every namespace to the gateway and restores calls 
   assert.ok(createThread?.inputSchema, "create_thread schema survives the relay");
   assert.equal(createThread.inputSchema.type, "object");
   const fetchIssue = outgoing.tools.find(
-    (tool) => tool.name === "mcp__git_forge__github__fetch_issue",
+    (tool) => tool.name === "mcp__codex_apps__github__fetch_issue",
   );
   assert.deepEqual(fetchIssue?.parameters, {
     type: "object",

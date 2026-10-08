@@ -1284,10 +1284,8 @@ export function flattenNamespaceTools(
   // `defer_loading: true` and pairs them with a client-executed `tool_search`
   // control (the `LoadableToolSpec` wire shape). The Responses backend keeps
   // those definitions out of the model's context until a search returns them;
-  // a chat-completions provider has no such concept, so flattening them all
-  // renders the entire connector surface -- hundreds of app tools, most of an
-  // MB of JSON Schema -- into the prompt of a one-word turn. Omit the deferred
-  // definitions and let the model reach them exactly as a native model does:
+  // a chat-completions provider has no such concept. Keep explicit deferred
+  // function definitions out of the eager surface and make them available
   // through the bridged search relay, whose `tool_search_output` definitions
   // `flattenToolSearchHistory` adds back on the next turn. Only a live relay
   // makes that reachable, so without one every definition is still sent.
