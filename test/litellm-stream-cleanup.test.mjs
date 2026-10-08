@@ -6,8 +6,13 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { PYTHON_REQUIREMENTS, requirementParts } from "../src/install-plan.mjs";
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const python = process.env.MODEL_ROUTER_TEST_LITELLM_PYTHON;
+const litellmVersion = PYTHON_REQUIREMENTS.map(requirementParts)
+  .find(({ name }) => name === "litellm")?.version;
+assert.ok(litellmVersion, "the installer must pin LiteLLM");
 
 // Ordinary Node tests need no Python install. The protocol workflow always
 // supplies its freshly hash-locked interpreter and runs this test explicitly.
@@ -33,7 +38,7 @@ from litellm.integrations.custom_logger import CustomLogger
 from litellm.litellm_core_utils.streaming_handler import CustomStreamWrapper
 from litellm.responses.litellm_completion_transformation.streaming_iterator import LiteLLMCompletionStreamingIterator as Iterator
 
-assert importlib.metadata.version("litellm") == "1.96.0"
+assert importlib.metadata.version("litellm") == sys.argv[2]
 assert importlib.metadata.version("openai") == "2.53.0"
 assert not hasattr(Iterator, "aclose"), "reassess this compatibility when upstream implements cleanup"
 spec = importlib.util.spec_from_file_location("router_cleanup_fixture", sys.argv[1])
@@ -162,10 +167,12 @@ class Cleanup(unittest.IsolatedAsyncioTestCase):
         saved = Iterator.aclose
         try:
             del Iterator.aclose
-            with patch.object(module, "version", return_value="99.0.0"):
-                with self.assertRaisesRegex(RuntimeError, "Review stream cleanup compatibility"):
-                    module.install_stream_cleanup()
-            self.assertFalse(hasattr(Iterator, "aclose"))
+            for unreviewed in ["1.96.1", "99.0.0"]:
+                with self.subTest(version=unreviewed):
+                    with patch.object(module, "version", return_value=unreviewed):
+                        with self.assertRaisesRegex(RuntimeError, "Review stream cleanup compatibility"):
+                            module.install_stream_cleanup()
+                    self.assertFalse(hasattr(Iterator, "aclose"))
         finally:
             Iterator.aclose = saved
 
@@ -187,7 +194,7 @@ unittest.main(argv=[sys.argv[0]], verbosity=2)
     for (const key of ["SYSTEMROOT", "SystemRoot", "WINDIR"]) {
       if (process.env[key]) environment[key] = process.env[key];
     }
-    const result = spawnSync(path.resolve(python), ["-I", "-B", "-c", script, path.join(root, "src", "litellm_stream_cleanup_callback.py")], {
+    const result = spawnSync(path.resolve(python), ["-I", "-B", "-c", script, path.join(root, "src", "litellm_stream_cleanup_callback.py"), litellmVersion], {
       cwd: scratch,
       env: environment,
       encoding: "utf8",
