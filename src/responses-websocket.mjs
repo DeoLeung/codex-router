@@ -776,7 +776,12 @@ class ResponsesWebSocketPeer {
   // would hold the descriptor open. A received close frame keeps the graceful
   // path so the close reply still flushes before the socket is released.
   abort({ hard = false } = {}) {
-    if (this.closed) return;
+    if (this.closed) {
+      // A close reply may still be blocked in destroySoon(). A later FIN or
+      // error must release the transport without repeating turn cancellation.
+      if (hard && !this.socket.destroyed) this.socket.destroy();
+      return;
+    }
     this.closed = true;
     this.abortController.abort(new Error("Responses WebSocket closed."));
     this.continuations.clear();

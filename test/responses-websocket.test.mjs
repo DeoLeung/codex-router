@@ -1637,3 +1637,36 @@ test("releases the upgraded socket when the peer drops without a close frame", a
   stalled.socket.end();
   await waitFor(() => accepted.length === 4 && accepted.every((socket) => socket.destroyed), 5_000);
 });
+
+test("a transport end releases a backpressured socket after its close frame", async (t) => {
+  const bulk = "x".repeat(8_192);
+  const { server, port } = await startServer(async (request, response) => {
+    sse(response, Array.from({ length: 6_000 }, (_, index) => ({
+      type: "response.output_text.delta",
+      delta: `${index}:${bulk}`,
+    })));
+  });
+  let accepted;
+  server.on("upgrade", (request, socket) => { accepted = socket; });
+  const client = await connect(port);
+  t.after(() => {
+    client.socket.destroy();
+    accepted?.destroy();
+    server.close();
+  });
+  client.socket.pause();
+  client.peer.sendJson(createRequest());
+  let progress = { bytes: -1, at: 0 };
+  await waitFor(() => {
+    if (!accepted?.writableNeedDrain) return false;
+    if (accepted.bytesWritten !== progress.bytes) {
+      progress = { bytes: accepted.bytesWritten, at: Date.now() };
+      return false;
+    }
+    return Date.now() - progress.at >= 250;
+  }, 10_000);
+  // The close frame starts graceful disposal before this same write's FIN
+  // ends the readable side. The FIN must escalate even though closed is set.
+  client.peer.close();
+  await waitFor(() => accepted.destroyed, 5_000);
+});
