@@ -776,6 +776,13 @@ class ResponsesWebSocketPeer {
     this.closed = true;
     this.abortController.abort(new Error("Responses WebSocket closed."));
     this.continuations.clear();
+    // The upgraded socket came from http.Server, which allows half-open
+    // connections, so a peer that goes away without a close frame (a FIN, a
+    // reset, a killed client) ends only the readable side. Nothing else closes
+    // the writable side, and Node keeps the descriptor until something does:
+    // one leaked handle per dropped connection, for the life of the process.
+    // destroySoon flushes a pending close frame first and then releases it.
+    if (!this.socket.destroyed) this.socket.destroySoon();
   }
 
   send(opcode, payload) {
