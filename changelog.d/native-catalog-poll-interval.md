@@ -1,0 +1,1 @@
+- **Allow a slower native catalog polling interval.** Set `CODEX_ROUTER_NATIVE_CATALOG_POLL_INTERVAL_MS` to a bounded integer of at least five minutes, such as `86400000` for daily checks. Service renderers persist the override; startup checks, manual refresh, and account-cache freshness keep their existing behavior.

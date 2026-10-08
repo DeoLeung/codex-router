@@ -25,6 +25,20 @@ Neither command prints credential values. Repair refuses unknown router owners.
 
 **Uninstall is never required** to see new OpenAI/Codex native models. While its merged catalog is installed, the router conditionally refreshes the signed-in account catalog itself, watches the resulting model fingerprint plus a lightweight fingerprint of the resolved Codex executable, and republishes when either source changes. A failed or unavailable account request leaves the prior cache untouched and falls back to that cache plus the bundled catalog. Discovery-disabled installs make no account request. Drift is checked on startup and periodically while the router stays running.
 
+The periodic check defaults to five minutes. To check once per day, set
+`CODEX_ROUTER_NATIVE_CATALOG_POLL_INTERVAL_MS=86400000`. Accepted values are
+integer milliseconds from `300000` to `2147483647`; invalid values retain the
+five-minute default. This changes only the periodic check: startup still checks
+immediately, the account-cache freshness TTL remains five minutes, and a manual
+`refresh-catalog` still forces a refresh. A longer interval can delay automatic
+discovery of account or executable changes until the next check.
+
+Pass the setting when installing the service; the macOS, Linux, and Windows
+renderers persist its normalized value. For an existing service, set it in the
+launchd environment, systemd environment, or Windows launcher and reload the
+service definition. A process restart alone does not reload a changed launchd
+property list. Restart the router after changing its environment.
+
 **Codex full quit/reopen is still required** to reload the catalog file. Codex reads `model_catalog_json` once at startup; the router cannot make Codex hot-reload.
 
 Expected flow:

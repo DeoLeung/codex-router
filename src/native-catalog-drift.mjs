@@ -2,7 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { NATIVE_CATALOG_PATH, CONFIG_PATH } from "./paths.mjs";
 import { nativeCatalogIsReusable, readModelsCache, routedCatalogConfigured } from "./catalog.mjs";
 import { codexBinaryFingerprint, codexVersion } from "./codex-binary.mjs";
-import { NATIVE_ACCOUNT_CATALOG_TTL_MS, refreshNativeAccountCatalog } from "./native-account-catalog.mjs";
+import { refreshNativeAccountCatalog } from "./native-account-catalog.mjs";
+import { nativeCatalogPollIntervalMs } from "./native-catalog-settings.mjs";
 import { discoveryDisabled } from "./discovery-mode.mjs";
 import { routedCodexAgentStatus } from "./codex-agent-catalog.mjs";
 import {
@@ -175,6 +176,7 @@ export function watchNativeCatalog({
   clear = clearInterval,
   log = console.error,
   immediate = false,
+  environment = process.env,
 } = {}) {
   let running = false;
   let stopped = false;
@@ -189,7 +191,7 @@ export function watchNativeCatalog({
       running = false;
     }
   };
-  const timer = interval(refresh, NATIVE_ACCOUNT_CATALOG_TTL_MS);
+  const timer = interval(refresh, nativeCatalogPollIntervalMs(environment));
   // Background maintenance must not keep a stopped supervisor alive.
   timer.unref?.();
   if (immediate) void refresh();

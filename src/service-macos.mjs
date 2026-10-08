@@ -22,6 +22,7 @@ import {
 } from "./paths.mjs";
 import { providerApiKeyServiceEnvironment } from "./provider-api-key-service-environment.mjs";
 import { serviceZaiCodingStreamEnvironment } from "./zai-stream-timeouts.mjs";
+import { serviceNativeCatalogEnvironment } from "./native-catalog-settings.mjs";
 import { serviceProxyEnvironment } from "./proxy-environment.mjs";
 import { serviceAppConnectorEnvironment } from "./app-connector-policy.mjs";
 import { serviceGrokPatchHookEnvironment } from "./grok-patch-hook-settings.mjs";
@@ -94,6 +95,7 @@ function environmentEntries() {
     ...serviceGrokPatchHookEnvironment(),
     ...providerApiKeyServiceEnvironment(),
     ...serviceZaiCodingStreamEnvironment(),
+    ...serviceNativeCatalogEnvironment(),
     ...serviceStartupBackoffEnvironment(),
     ...(process.env.CODEX_ROUTER_SOURCE_ROOT
       ? { CODEX_ROUTER_SOURCE_ROOT: SOURCE_ROOT }
