@@ -2,15 +2,15 @@
   "version": 1,
   "models": [
     {
-      "slug": "anthropic-api/claude-opus-4.8",
-      "gatewayModel": "anthropic-api-claude-opus-4-8",
-      "upstreamModel": "claude-opus-4-8",
+      "slug": "anthropic-api/claude-haiku-5.5",
+      "gatewayModel": "anthropic-api-claude-haiku-5-5",
+      "upstreamModel": "claude-haiku-5-5",
       "provider": "anthropic-api",
       "listed": true,
-      "displayName": "Claude Opus 4.8 (API)",
-      "description": "Claude Opus 4.8 through the separately billed Anthropic API for complex agentic coding.",
-      "priority": 13,
-      "defaultEffort": "high",
+      "displayName": "Claude Haiku 5.5 (API)",
+      "description": "Claude Haiku 5.5 through the separately billed Anthropic API for high-volume, latency-sensitive tasks and lightweight agents.",
+      "priority": 12,
+      "defaultEffort": "medium",
       "reasoningLevels": [
         {
           "effort": "low",
@@ -33,15 +33,14 @@
           "description": "Unconstrained thinking on every response"
         }
       ],
-      "contextWindow": 1048576,
+      "contextWindow": 1000000,
       "autoCompact": 900000,
       "inputModalities": [
         "text",
         "image"
       ],
       "requestProfile": "anthropic-reasoning",
-      "supportsImageDetailOriginal": true,
-      "compHash": "anthropic-api-claude-opus-4-8-v2"
+      "compHash": "anthropic-api-claude-haiku-5-5-v1"
     }
   ]
 }

@@ -1,0 +1,1 @@
+- **The `stealth/space-bunny-alpha` routes on OpenRouter and Command Code are retired.** OpenRouter now lists the model with zero serving endpoints and both providers' live catalogs report it unavailable (checked 2026-10-08), so those picker entries could no longer answer. OpenCode serves the model under its own id, `space-bunny-free`, which stays a locally curated route.

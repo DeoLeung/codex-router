@@ -2,14 +2,14 @@
   "version": 1,
   "models": [
     {
-      "slug": "anthropic-api/claude-opus-4.8",
-      "gatewayModel": "anthropic-api-claude-opus-4-8",
-      "upstreamModel": "claude-opus-4-8",
+      "slug": "anthropic-api/claude-fable-5.1",
+      "gatewayModel": "anthropic-api-claude-fable-5-1",
+      "upstreamModel": "claude-fable-5-1",
       "provider": "anthropic-api",
       "listed": true,
-      "displayName": "Claude Opus 4.8 (API)",
-      "description": "Claude Opus 4.8 through the separately billed Anthropic API for complex agentic coding.",
-      "priority": 13,
+      "displayName": "Claude Fable 5.1 (API)",
+      "description": "Claude Fable 5.1 through the separately billed Anthropic API for demanding reasoning and long-horizon agentic work.",
+      "priority": 10,
       "defaultEffort": "high",
       "reasoningLevels": [
         {
@@ -33,15 +33,14 @@
           "description": "Unconstrained thinking on every response"
         }
       ],
-      "contextWindow": 1048576,
+      "contextWindow": 1000000,
       "autoCompact": 900000,
       "inputModalities": [
         "text",
         "image"
       ],
       "requestProfile": "anthropic-reasoning",
-      "supportsImageDetailOriginal": true,
-      "compHash": "anthropic-api-claude-opus-4-8-v2"
+      "compHash": "anthropic-api-claude-fable-5-1-v1"
     }
   ]
 }
