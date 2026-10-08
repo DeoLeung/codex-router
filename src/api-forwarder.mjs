@@ -1684,8 +1684,9 @@ async function relayUpstreamResponse(
           // written down. The gateway relays the frame as a bare "in-stream
           // error", so without this line a refused stream cannot be diagnosed
           // from any log (#837).
+          // User-model IDs may contain controls or be large; keep one bounded line.
           onInvalid: (reason) => console.error(
-            `[api-forwarder] refused Responses stream provider=${normalized.provider.id} model=${normalized.model.upstreamModel}: ${reason}`,
+            `[api-forwarder] refused Responses stream provider=${JSON.stringify(String(normalized.provider.id).slice(0, 256))} model=${JSON.stringify(String(normalized.model.upstreamModel).slice(0, 256))}: ${reason}`,
           ),
         })
       : undefined,

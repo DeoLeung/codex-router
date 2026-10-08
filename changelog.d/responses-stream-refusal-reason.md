@@ -4,4 +4,5 @@
   client only inside an SSE frame that the gateway relays as "Response API
   in-stream error", so no log named the cause. The forwarder now writes one
   `refused Responses stream provider=... model=...: <reason>` line per refused
-  stream. The text is router-authored; no upstream bytes are logged.
+  stream. The reason is router-authored; model identifiers are quoted and
+  bounded, and no upstream response bytes are logged.

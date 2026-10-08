@@ -137,7 +137,7 @@ test("Muse Spark 1.3 routes use auto-tool-choice request profile", () => {
   }
 });
 
-// Command Code documents no effort values for Muse Spark, so both 1.3 routes
+// Command Code's Provider API documents no effort values for Muse Spark, so both 1.3 routes
 // keep the single `high` level and no reasoning summaries of the 1.2 route
 // rather than Meta's Responses ladder. The Contributor tier is a sibling of
 // 1.3, so it is held to that same shape; Command Code still carries no 1.2

@@ -866,7 +866,7 @@ test("DeepSeek V4 Flash routes opt in to Codex standalone web search", () => {
 
 // DeepSeek documents low/high/max for the V4 family and the forwarder already
 // maps all three (`deepSeekEffort`). V4 Pro used to advertise only high/max, so
-// the Codex picker could not select the cheaper rung its Flash siblings offer
+// the Codex picker could not select the lower-effort rung its Flash siblings offer
 // (#887). The default stays `high`.
 test("DeepSeek V4 Pro on the direct API advertises the same effort ladder as V4 Flash", () => {
   const pro = MODEL_BY_SLUG.get("deepseek/deepseek-v4-pro");
