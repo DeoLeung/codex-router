@@ -542,6 +542,7 @@ if (command === "render") {
 } else if (command === "render-task") {
   process.stdout.write(`${JSON.stringify(taskAction())}\n`);
 } else if (command === "install") {
+  serviceAppConnectorEnvironment();
   // Keep the guard outside the scheduler-recovery catch below. An unredirected
   // test install is a safety violation, not a restricted Task Scheduler
   // failure, and must exit non-zero without touching the host filesystem.

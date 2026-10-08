@@ -1661,8 +1661,14 @@ function referencedDeferredDefinitions(input, tools, namespaces, toolChoice) {
     if (namespace) {
       entry = byIdentity.get(nativeToolKey(namespace, name));
     } else {
-      entry = withheld.get(name) ?? byIdentity.get(nativeToolKey(undefined, name));
-      if (!entry && !providerNames.has(name)) {
+      // A plain native function can share the raw spelling of a namespace
+      // child while their provider aliases differ. Match the plain identity
+      // first, as history and tool-choice rewriting do, so an eager plain
+      // choice cannot restore an unrelated connector or consume its slot.
+      const plainIdentity = nativeToolKey(undefined, name);
+      const plainProviderName = NAME_ALIASES.get(namespaces)?.nativeToProvider.get(plainIdentity);
+      entry = byIdentity.get(plainIdentity) ?? withheld.get(plainProviderName ?? name);
+      if (!entry && !plainProviderName && !providerNames.has(name)) {
         entry = byWireName.get(name);
         if (!entry) {
           const owners = bareOwners.get(name);

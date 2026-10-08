@@ -1229,6 +1229,44 @@ test("Groq refuses string-input connector restoration when all 128 tool slots ar
   }
 });
 
+test("Groq keeps a colliding plain choice at 128 tools and refuses its hidden namespace sibling", async () => {
+  const fixture = groqModelFixture();
+  try {
+    const payload = (stream, model, toolChoice) => {
+      const request = selectedConnectorPayload(stream, model, "find the message", toolChoice, 124);
+      request.tools.push({ type: "function", name: "mcp__codex_apps__gmail__search",
+        description: "Plain collision owner.", parameters: { type: "object", properties: {} } });
+      return request;
+    };
+    const environment = { MODEL_ROUTER_USER_MODELS: fixture.userModels, CODEX_ROUTER_APP_CONNECTORS: "none" };
+    const plain = await scenario(false, {
+      model: fixture.model,
+      requestPayload: (stream, model) => payload(stream, model,
+        { type: "function", name: "mcp__codex_apps__gmail__search" }),
+      jsonBody: () => ({ id: "plain-collision-choice", output: [] }),
+      routerEnv: environment,
+    });
+    assert.equal(plain.gatewayBodies.length, 1);
+    const outgoing = plain.gatewayBodies[0];
+    const selected = outgoing.tools.find(tool => tool.description === "Plain collision owner.");
+    assert.ok(selected);
+    assert.equal(outgoing.tools.length, 128);
+    assert.deepEqual(outgoing.tool_choice, { type: "function", name: selected.name });
+
+    const connector = await scenario(false, {
+      model: fixture.model,
+      requestPayload: (stream, model) => payload(stream, model,
+        { type: "function", namespace: "mcp__codex_apps__gmail", name: "search" }),
+      routerEnv: environment,
+      expectedStatus: 400,
+    });
+    assert.equal(connector.gatewayBodies.length, 0);
+    assert.equal(JSON.parse(connector.clientBody).error.code, "groq_tool_limit_exceeded");
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
 test("Groq re-adds a deferred app definition used by prior native history", async () => {
   const fixture = groqModelFixture();
   try {

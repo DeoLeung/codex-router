@@ -273,6 +273,7 @@ if (command === "render") {
     })}\n`,
   );
 } else if (command === "install") {
+  serviceAppConnectorEnvironment();
   // Before anything, including the bootout below: an install that is going to
   // be refused for writing outside its fixture must not first unload the
   // machine's running service. writePlist re-checks; the guard is a pure

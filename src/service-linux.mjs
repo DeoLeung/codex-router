@@ -174,6 +174,7 @@ if (!new Set(["install", "uninstall", "start", "stop", "restart", "status", "ren
 if (command === "render") {
   process.stdout.write(unit());
 } else if (command === "install") {
+  serviceAppConnectorEnvironment();
   writeUnit();
   systemctl(["daemon-reload"], { quiet: true });
   // systemd's append: opens the log before the service runs, so the started
