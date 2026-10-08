@@ -1594,3 +1594,24 @@ test("aborts the internal HTTP request when the WebSocket disappears", async (t)
   socket.destroy();
   await waitFor(() => requestAborted);
 });
+
+test("releases the upgraded socket when the peer drops without a close frame", async (t) => {
+  const { server, port } = await startServer(async (request, response) => {
+    response.writeHead(200, { "content-type": "application/json" }).end("{}");
+  });
+  const accepted = [];
+  server.on("connection", (socket) => accepted.push(socket));
+  const clients = [];
+  t.after(() => {
+    for (const client of clients) client.socket.destroy();
+    server.close();
+  });
+  for (let index = 0; index < 3; index += 1) clients.push(await connect(port));
+  const [finished, reset, closed] = clients;
+  // A plain FIN, a reset, and a proper close frame: before the fix only the
+  // close frame released the server-side socket.
+  finished.socket.end();
+  reset.socket.resetAndDestroy();
+  closed.peer.close();
+  await waitFor(() => accepted.length === 3 && accepted.every((socket) => socket.destroyed));
+});
