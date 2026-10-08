@@ -2944,6 +2944,66 @@ test("response transform pins only an unadvertised spawn-agent override to the r
   });
 });
 
+for (const deferMode of ["eager", "namespace", "function"]) {
+  for (const schemaField of ["parameters", "inputSchema"]) {
+    test(`${deferMode} spawn-agent ${schemaField} preserves advertised model overrides on JSON and stream responses`, async () => {
+      const tools = [
+        { type: "tool_search", execution: "client", parameters: { type: "object" } },
+        {
+          type: "namespace",
+          name: "collaboration",
+          ...(deferMode === "namespace" ? { defer_loading: true } : {}),
+          tools: [{
+            type: "function",
+            name: "spawn_agent",
+            ...(deferMode === "function" ? { defer_loading: true } : {}),
+            [schemaField]: {
+              type: "object",
+              properties: {
+                message: { type: "string" },
+                model: { type: "string", enum: ["advertised-model"] },
+              },
+            },
+          }],
+        },
+      ];
+      const before = structuredClone(tools);
+      const flat = flattenNamespaceTools(tools, { aliasCollisions: true });
+      assert.equal(flat.tools.some(tool => tool.name === "collaboration__spawn_agent"), deferMode === "eager");
+      const restored = flattenToolSearchHistory("verify", flat.tools, flat.namespaces, {
+        toolChoice: { type: "function", namespace: "collaboration", name: "spawn_agent" },
+      });
+      assert.equal(restored.tools.filter(tool => tool.name === "collaboration__spawn_agent").length, 1);
+      const lookups = buildNamespaceLookups(flat.namespaces);
+      assert.deepEqual([...lookups.spawnAgentModels], ["advertised-model"]);
+      for (const parentModel of [undefined, "routed-parent"]) {
+        for (const model of ["advertised-model", "invented-model"]) {
+          const item = {
+            type: "function_call", name: "collaboration__spawn_agent", call_id: "call_deferred_spawn",
+            arguments: JSON.stringify({ message: "verify", model }),
+          };
+          const expected = {
+            message: "verify",
+            ...(model === "advertised-model" ? { model } : parentModel ? { model: parentModel } : {}),
+          };
+          const response = rewriteNamespaceResponsePayload({ output: [item] }, lookups, parentModel);
+          assert.equal(response.output[0].namespace, "collaboration");
+          assert.equal(response.output[0].name, "spawn_agent");
+          assert.deepEqual(JSON.parse(response.output[0].arguments), expected);
+          const stream = await collect(Readable.from([
+            `data: ${JSON.stringify({ type: "response.output_item.done", item })}\n\n`,
+          ]).pipe(new NamespaceToolCallTransform(flat.namespaces, "text/event-stream", parentModel)));
+          const event = JSON.parse(stream.trim().slice(5));
+          assert.equal(event.item.namespace, "collaboration");
+          assert.equal(event.item.name, "spawn_agent");
+          assert.deepEqual(JSON.parse(event.item.arguments), expected);
+        }
+      }
+      assert.deepEqual(tools, before);
+    });
+  }
+}
+
 test("stream response keeps an omitted spawn-agent model on its routed parent", async () => {
   const { namespaces } = flattenNamespaceTools(clientRoutedTools());
   const event = {

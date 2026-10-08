@@ -1361,6 +1361,12 @@ export function flattenNamespaceTools(
         // alias table a later search-discovered definition is flattened
         // against stays identical to the eager one.
         const providerName = providerNameForNative(namespaces, tool.name, fn.name);
+        // The registered model enum also governs restored calls, even while
+        // the definition is deferred and absent from the provider inventory.
+        if (tool.name === "collaboration" && fn.name === "spawn_agent") {
+          const schema = fn.parameters ?? fn.inputSchema;
+          schemaStringValues(schema?.properties?.model, spawnAgentModels);
+        }
         // Only functions have a recoverable deferred definition. Custom tools
         // use their own call/history relay and must remain provider-visible.
         const functionChild = fn.type === undefined || fn.type === "function";
@@ -1381,10 +1387,6 @@ export function flattenNamespaceTools(
         }
         flattened.push(flattenNamespaceChild(tool.name, fn, providerName));
         names.add(fn.name);
-        if (tool.name === "collaboration" && fn.name === "spawn_agent") {
-          const schema = fn.parameters ?? fn.inputSchema;
-          schemaStringValues(schema?.properties?.model, spawnAgentModels);
-        }
       }
       if (names.size > 0) {
         namespaces.set(tool.name, names);
