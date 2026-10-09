@@ -321,6 +321,7 @@ const CURATION_ROUTES = Object.freeze({
       "mimo-v2.6-flash",
       "mimo-v2.6-pro",
       "qwen3.5-plus",
+      "step-5-preview-free",
       "x-preview-f",
     ]),
     models: Object.freeze({}),
