@@ -69,6 +69,7 @@ const METADATA_FIELDS = new Set([
   "availabilityNux",
   "upgradeTo",
   "requiresTrailingUserTurn",
+  "goalContinuationGuard",
   "isFree",
   "toolSchemaRecursion",
   "supportedEndpoints",
