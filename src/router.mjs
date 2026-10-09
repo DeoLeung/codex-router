@@ -235,6 +235,10 @@ import {
   supportsOpenAIModelEndpoint,
 } from "./openai-endpoint-policy.mjs";
 import { recordUsageEvent } from "./usage-events.mjs";
+import {
+  assertGoalContinuationProgress,
+  GoalContinuationNoProgressError,
+} from "./goal-continuation-guard.mjs";
 import { createRequestProgress } from "./request-progress.mjs";
 import {
   grokOauthIngressContextBytes,
@@ -4546,6 +4550,11 @@ async function handleResponses(request, response, requestUrl) {
     // terminal trigger. Detect the protocol shape before route dispatch so the
     // native path can also preserve the full tool results being summarized.
     const compactV2 = isRemoteCompactV2Trigger(payload);
+    // Gate generation only, before conversion or any provider request.
+    // Compaction summarizes existing history rather than continuing a goal.
+    if (route?.goalContinuationGuard === true && !compactV1 && !compactV2) {
+      assertGoalContinuationProgress(payload.input);
+    }
 
     // The same normalization the routed compaction path would do, hoisted so
     // the budget is judged on the bytes that actually go upstream and so the
@@ -5690,7 +5699,8 @@ async function handleResponses(request, response, requestUrl) {
       );
     }
   } catch (error) {
-    upstreamLatencyMs ??= Date.now() - startedAt;
+    // A local goal refusal has no upstream response latency to meter.
+    if (!(error instanceof GoalContinuationNoProgressError)) upstreamLatencyMs ??= Date.now() - startedAt;
     if (activity.deadlineExceeded()) {
       finalStatus = 504;
       activityStatus = 504;
@@ -6608,11 +6618,13 @@ const server = http.createServer((request, response) => {
     if (!response.headersSent) {
       writeJson(response, status, {
         error: {
-          type: "local_router_error",
+          type: error instanceof GoalContinuationNoProgressError ? "invalid_request_error" : "local_router_error",
           code: transport?.code || error?.code,
           message: transport
             ? `The local router could not complete the request: ${transport.cause}.${transport.hint}`
-            : "The local router could not complete the request.",
+            : error instanceof GoalContinuationNoProgressError
+              ? error.message
+              : "The local router could not complete the request.",
         },
       });
     } else {

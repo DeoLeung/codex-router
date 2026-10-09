@@ -670,6 +670,9 @@ function modelProblem(model, providers, slugs, gatewayModels) {
   if (model.requestProfile !== undefined && !requestProfileKnown(model.requestProfile)) {
     return `model ${model.slug} has an invalid requestProfile`;
   }
+  if (model.goalContinuationGuard !== undefined && typeof model.goalContinuationGuard !== "boolean") {
+    return `model ${model.slug} has an invalid goalContinuationGuard flag`;
+  }
   if (model.supportedEndpoints !== undefined) {
     let supported;
     try {
