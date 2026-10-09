@@ -1,0 +1,1 @@
+- **The checked-in `opencode-free-responses/muse-spark-1.3-contributor-free` route is retired.** OpenCode serves its free tier only to its own client and answers `FreeTierError` (HTTP 403) on both Chat Completions and Responses, so the route could not serve a request. The id stays on the client-gated list, so `curate-models` still refuses it.

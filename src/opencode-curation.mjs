@@ -252,7 +252,6 @@ const CURATION_ROUTES = Object.freeze({
       "poolside/laguna-s-2.1-free",
       "sakana/fugu-ultra",
       "stealth/ox-alpha",
-      "stealth/space-bunny-alpha",
       "stepfun/Step-3.7-Flash",
       "tencent/hy3-paid",
       "tencent/hy4-preview",
