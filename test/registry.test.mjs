@@ -1887,6 +1887,25 @@ test("the Copilot auth profile cannot be attached to an OAuth provider", async (
   }
 });
 
+// LiteLLM retries every status of 500 and above twice. ClinePass can answer
+// HTTP 200 and still declare the result unsuccessful, which the forwarder
+// reports as a 500, so its deployments are single-shot: the prompt must not
+// reach Cline three times for a result the origin already produced.
+test("ClinePass deployments are single-shot inside LiteLLM, and only they are", () => {
+  const rendered = renderLiteLlmConfig();
+  const blocks = [...rendered.matchAll(/  - model_name: "([^"]+)"\n([\s\S]*?)(?=\n  - model_name:|\nlitellm_settings:)/g)];
+  const clinePass = MODELS.filter((model) => model.provider === "clinepass").map((model) => model.gatewayModel);
+  assert.ok(clinePass.length > 0);
+  for (const gatewayModel of clinePass) {
+    const block = blocks.find((entry) => entry[1] === gatewayModel);
+    assert.ok(block, gatewayModel);
+    assert.match(block[2], /^      num_retries: 0$/m, gatewayModel);
+  }
+  const deepSeek = blocks.find((entry) => entry[1] === "deepseek-v4-flash");
+  assert.ok(deepSeek);
+  assert.doesNotMatch(deepSeek[2], /num_retries/);
+});
+
 // The OpenAI-compatible surface silently ignores num_ctx, so a local model
 // routed through it gets Ollama's maximum context -- a ~15 GB KV cache for ~2 GB
 // of weights, which overflows a 16 GB machine and drops inference onto the CPU.
