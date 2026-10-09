@@ -10,6 +10,7 @@ test("native catalog watcher refreshes periodically without overlapping passes",
   let release;
   let calls = 0;
   const stop = watchNativeCatalog({
+    environment: {},
     clear(timer) { assert.equal(timer, 1); },
     interval(callback, delay) {
       tick = callback;
@@ -32,6 +33,43 @@ test("native catalog watcher refreshes periodically without overlapping passes",
   release();
   await second;
   stop();
+});
+
+test("a daily polling override preserves immediate startup, serial passes, and timer disposal", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  let calls = 0;
+  let release;
+  const day = 86_400_000;
+  const stop = watchNativeCatalog({
+    environment: { CODEX_ROUTER_NATIVE_CATALOG_POLL_INTERVAL_MS: String(day) },
+    immediate: true,
+    republish() {
+      calls += 1;
+      return new Promise((resolve) => { release = resolve; });
+    },
+  });
+  try {
+    assert.equal(calls, 1, "startup remains immediate with a slow periodic cadence");
+    t.mock.timers.tick(day);
+    assert.equal(calls, 1, "the first daily tick cannot overlap startup");
+    release(false);
+    await Promise.resolve();
+    t.mock.timers.tick(NATIVE_ACCOUNT_CATALOG_TTL_MS);
+    assert.equal(calls, 1, "cache TTL does not set the polling cadence");
+    t.mock.timers.tick(day - NATIVE_ACCOUNT_CATALOG_TTL_MS - 1);
+    assert.equal(calls, 1);
+    t.mock.timers.tick(1);
+    assert.equal(calls, 2, "a completed pass permits the next daily tick");
+    release(false);
+    await Promise.resolve();
+    stop();
+    t.mock.timers.tick(day);
+    assert.equal(calls, 2, "a disposed daily timer schedules no more passes");
+    assert.equal(NATIVE_ACCOUNT_CATALOG_TTL_MS, 300_000);
+  } finally {
+    stop();
+    release?.(false);
+  }
 });
 
 test("native catalog watcher recovers after synchronous and asynchronous failures", async () => {

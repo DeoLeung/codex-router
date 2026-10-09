@@ -25,6 +25,7 @@ import {
 import { ensureCheckoutReadable, protectPrivateFile } from "./file-security.mjs";
 import { providerApiKeyServiceEnvironment } from "./provider-api-key-service-environment.mjs";
 import { serviceZaiCodingStreamEnvironment } from "./zai-stream-timeouts.mjs";
+import { serviceNativeCatalogEnvironment } from "./native-catalog-settings.mjs";
 import { serviceProxyEnvironment } from "./proxy-environment.mjs";
 import { serviceAppConnectorEnvironment } from "./app-connector-policy.mjs";
 import { serviceGrokPatchHookEnvironment } from "./grok-patch-hook-settings.mjs";
@@ -94,6 +95,7 @@ function wrapper() {
     ...serviceGrokPatchHookEnvironment(),
     ...providerApiKeyServiceEnvironment(),
     ...serviceZaiCodingStreamEnvironment(),
+    ...serviceNativeCatalogEnvironment(),
     ...serviceStartupTimeoutEnvironment(),
     ...serviceStartupBackoffEnvironment(),
     // The LiteLLM gateway is a Python process. Force UTF-8 output so its
