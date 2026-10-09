@@ -83,6 +83,7 @@ import {
 import { applyGrokFileToolsOverlay } from "./instruction-overlays.mjs";
 import { ResponsesHeartbeatTransform } from "./responses-heartbeat.mjs";
 import { responsesStreamFailureTransform } from "./responses-stream-failure.mjs";
+import { glmRepetitionGuardTransform, REPETITIVE_GENERATION_CODE } from "./glm-repetition-guard.mjs";
 import { messagePhaseTransform } from "./message-phase.mjs";
 import { translatedToolMessageCompatTransform } from "./deepseek-tool-message-compat.mjs";
 import {
@@ -105,6 +106,17 @@ import {
   providerForModel,
 } from "./model-registry.mjs";
 import { isProviderPrefixedSlug, unroutedModelError } from "./unrouted-model.mjs";
+import {
+  WsUpgradeRefusedError,
+  RESPONSES_WEBSOCKET_BETA,
+  collectResponsesRequest,
+  markWsTransportFailure,
+  nativeWebSocketTransportEnabled,
+  responsesWebSocketTransportUsable,
+  responsesWebSocketUrl,
+  wsTransportAvailable,
+} from "./responses-ws-client.mjs";
+import { providerPoolRegistry } from "./provider-ws-pool.mjs";
 import { createHealthCache } from "./health-cache.mjs";
 import { discoveryDisabled } from "./discovery-mode.mjs";
 import { readNativeAliases } from "./native-alias.mjs";
@@ -1035,8 +1047,79 @@ function routedHeaders() {
 // DeepSeek's current model already speaks Codex's wire protocol. The shared
 // API forwarder still owns credentials and upstream transport; bypass only
 // LiteLLM, whose unknown-model fallback simulates native Responses streaming.
+function usesProviderResponsesWebSocket(route) {
+  const provider = providerForModel(route);
+  return provider?.generic === true && provider?.transport === "websocket" &&
+    (route.endpoint?.protocol ?? provider.protocol) === "openai-responses";
+}
+
+// The native upstream leg over the Responses WebSocket protocol. Native turns
+// are stateless full conversations either way (Codex re-sends the body on
+// HTTP, and this transport carries it as one frame), so the win here is the
+// persistent connection -- no per-turn TLS handshake -- not a smaller body.
+// Opt-in, with fallback only before a generation frame has been sent.
+const NATIVE_WS_BREAKER_KEY = "native-responses-ws";
+const nativeWsPools = providerPoolRegistry({
+  resolveProvider: (_providerId, target) => ({ wsTarget: () => target }),
+});
+
+function nativeWebSocketTransportSelected() {
+  return (
+    nativeWebSocketTransportEnabled() &&
+    responsesWebSocketTransportUsable() &&
+    wsTransportAvailable(NATIVE_WS_BREAKER_KEY)
+  );
+}
+
+async function nativeResponsesWebSocketFetch(url, init, { fallbackFetch, onSent, onHeaders }) {
+  const httpFallback = async () => {
+    const headers = { ...init.headers };
+    const body = await compressedNativeBody(init.body, headers);
+    return fallbackFetch(url, { ...init, headers, body });
+  };
+  let payload;
+  try { payload = JSON.parse(init.body.toString("utf8")); } catch { return httpFallback(); }
+  if (payload?.stream !== true || !Array.isArray(payload.input) || payload.previous_response_id) return httpFallback();
+  // Every forwarded identity participates in pool affinity. A turn-specific
+  // header cannot be replayed from a different request's frozen handshake.
+  const headers = Object.fromEntries(Object.entries(init.headers).filter(([name]) => FORWARD_HEADERS.has(name.toLowerCase())));
+  const beta = String(headers["openai-beta"] || "");
+  headers["openai-beta"] = [...new Set([...beta.split(",").map((token) => token.trim()).filter(Boolean), RESPONSES_WEBSOCKET_BETA])].join(", ");
+  let lease;
+  try {
+    const pool = await nativeWsPools.poolFor("native", { url: responsesWebSocketUrl(url), headers });
+    lease = await pool.acquire(init.signal);
+  } catch (error) {
+    if (init.signal?.aborted) throw error;
+    markWsTransportFailure(NATIVE_WS_BREAKER_KEY);
+    console.error("[codex-router] native websocket transport unavailable%s; using HTTP",
+      error instanceof WsUpgradeRefusedError && error.status !== undefined ? ` upgrade_status=${error.status}` : "");
+    return httpFallback();
+  }
+  onSent();
+  try {
+    const result = await collectResponsesRequest(lease.connection, payload, {
+      signal: init.signal,
+      onSettled: () => lease.release(),
+    });
+    onHeaders();
+    return result;
+  } catch (error) {
+    lease.connection.abort();
+    lease.release();
+    throw error;
+  }
+}
+
 function routedResponsesTarget(route) {
-  return `${usesDeepSeekResponses(route) ? API_BASE : GATEWAY_BASE}/responses`;
+  // WebSocket-transport providers terminate at the api-forwarder directly,
+  // exactly like DeepSeek Responses: LiteLLM has no WebSocket leg, and the
+  // forwarder owns both the credential boundary and the pooled upstream
+  // connections. Their litellm.yaml entries stay but go unused.
+  if (usesDeepSeekResponses(route) || usesProviderResponsesWebSocket(route)) {
+    return `${API_BASE}/responses`;
+  }
+  return `${GATEWAY_BASE}/responses`;
 }
 
 // LiteLLM translates Codex Responses requests into Chat Completions only after
@@ -4634,6 +4717,8 @@ async function handleResponses(request, response, requestUrl) {
     let target;
     let headers;
     let routedBody;
+    let nativeWsTransport = false;
+    let nativeWsSent = false;
     let builtSearchMode;
     let namespacesFlattened = false;
     let flattenedNamespaces = new Map();
@@ -4850,12 +4935,19 @@ async function handleResponses(request, response, requestUrl) {
           bufferNativeStream = true;
         }
       }
+      nativeWsTransport = !compactV1 && !compactV2 && nativeWebSocketTransportSelected();
       target = nativeTarget(requestUrl.pathname);
       headers = nativeHeaders(request);
-      routedBody = await compressedNativeBody(
-        Buffer.from(JSON.stringify(native), "utf8"),
-        headers,
-      );
+      // The native WebSocket transport speaks JSON frames, never a zstd
+      // Content-Encoding, so its turns keep the plain replayable body.
+      if (nativeWsTransport) {
+        routedBody = Buffer.from(JSON.stringify(native), "utf8");
+      } else {
+        routedBody = await compressedNativeBody(
+          Buffer.from(JSON.stringify(native), "utf8"),
+          headers,
+        );
+      }
     }
 
     // `routedBody` is a fully materialized Buffer -- plain JSON, or the zstd
@@ -4883,9 +4975,15 @@ async function handleResponses(request, response, requestUrl) {
         // Routed traffic terminates at the local gateway, which has its own
         // error translation and Retry-After handling below; leave it exactly
         // as it was.
-        fetchImpl: fetchObservedUpstream,
+        fetchImpl: nativeWsTransport
+          ? (url, init) => nativeResponsesWebSocketFetch(url, init, {
+              fallbackFetch: fetchObservedUpstream,
+              onSent: () => { nativeWsSent = true; activity.progress.attempt(); },
+              onHeaders: () => activity.progress.headers(),
+            })
+          : fetchObservedUpstream,
         retries: route ? 0 : undefined,
-        canRetry: () => nothingRelayed(response),
+        canRetry: () => !nativeWsSent && nothingRelayed(response),
         onRetry: (event) => logUpstreamRetry(event, requestedModel, requestUrl.pathname),
       },
     );
@@ -5250,6 +5348,8 @@ async function handleResponses(request, response, requestUrl) {
         ? invalidCompletedFunctionCallTransform(flattenedNamespaces, contentType)
         : undefined;
       if (invalidFunctionCall) transforms.push(invalidFunctionCall);
+      const repetitionGuard = glmRepetitionGuardTransform(route, contentType);
+      if (repetitionGuard) transforms.push(repetitionGuard);
       const guard =
         route && EMPTY_COMPLETION_RETRY
           ? new EmptyCompletionGuard(contentType, {
@@ -5433,6 +5533,18 @@ async function handleResponses(request, response, requestUrl) {
           ? "The model produced no output before the router's safety limit and then completed without output. The response had already started, so the router could not retry it safely."
           : "The model streamed reasoning but produced no output. The router could not retry because the response had already started.",
       });
+      finalStatus = 502;
+    } else if (
+      (emptyCompletion || preludeLimitRetryable || invalidFunctionCallRetryable) &&
+      (nativeWsSent || (route && usesProviderResponsesWebSocket(route)))
+    ) {
+      // The provider may still be generating after a local parser deadline.
+      // shortcut: WS-configured generic routes also skip repair on HTTP fallback;
+      // carry a trusted per-attempt marker if that distinction becomes necessary.
+      emptyCompletionUnrepairable = true;
+      clearStagedResponseHead(response);
+      writeEmptyCompletionError(response, "websocket_turn_not_replayed",
+        "The upstream turn ended without usable output. It was not replayed because generation may already have started.");
       finalStatus = 502;
     } else if (emptyCompletion || preludeLimitRetryable || invalidFunctionCallRetryable) {
       // The upstream answered 200 with nothing and never proved otherwise, so
@@ -5841,6 +5953,41 @@ async function handleResponses(request, response, requestUrl) {
       const firstTokenAt = usageTransform.firstTokenAt?.();
       if (firstTokenAt !== undefined) firstTokenMs = firstTokenAt - startedAt;
       reasoningStreamed = usageTransform.reasoningStreamed?.();
+    }
+    if (error?.code === REPETITIVE_GENERATION_CODE) {
+      const tokenTimes = [usageTransform?.firstTokenAt?.(), retryUsageTransform?.firstTokenAt?.()]
+        .filter((value) => value !== undefined);
+      if (tokenTimes.length) firstTokenMs = Math.min(...tokenTimes) - startedAt;
+      reasoningStreamed = usageTransform?.reasoningStreamed?.() || retryUsageTransform?.reasoningStreamed?.();
+      const streamed = response.headersSent;
+      finalStatus = streamed ? 502 : 400;
+      activityStatus = finalStatus;
+      if (streamed) {
+        writeStreamErrorEvent(response, { code: error.code, message: error.message, localRejection: true });
+        if (!response.writableEnded && !response.destroyed) response.end();
+      } else {
+        clearStagedResponseHead(response);
+        writeJson(response, 400, { error: { type: "generation_guard_error", code: error.code, message: error.message } });
+      }
+      recordObservedUsage({
+        model: route?.slug || requestedModel,
+        provider: route ? canonicalProviderId(route.provider) : "openai",
+        status: finalStatus,
+        durationMs: Date.now() - startedAt,
+        responseStartMs: upstreamLatencyMs,
+        firstTokenMs,
+        reasoningStreamed,
+        retries: upstreamRetries,
+        ...usage,
+        estimatedInputTokens,
+        ...toolResultAging,
+        ...imageBudget,
+        ...(streamed ? { streamAborted: true } : {}),
+        ...(emptyCompletionRetried ? { emptyCompletionRetried: true } : {}),
+        ...(failoverFrom ? { failoverFrom } : {}),
+      }, diagnostics);
+      usageRecorded = true;
+      return;
     }
     // Codex may close a native stream immediately after response.completed.
     // That is a successful terminal turn, not a canceled generation.
@@ -6709,3 +6856,5 @@ server.listen(LISTEN_PORT, LISTEN_HOST, () => {
 });
 
 installGracefulShutdown(server, { label: "codex-router" });
+process.once("SIGTERM", () => nativeWsPools.closeAll());
+process.once("SIGINT", () => nativeWsPools.closeAll());
