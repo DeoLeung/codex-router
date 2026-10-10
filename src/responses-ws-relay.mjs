@@ -108,6 +108,9 @@ function startRelayPeer({ socket, head, pool }) {
   let closed = false;
   let closeSent = false;
   let inFlight = undefined;
+  // The pooled upstream connection of the frame currently being relayed, so
+  // an interrupt control frame can be forwarded onto it.
+  let inFlightConnection = undefined;
   const controller = new AbortController();
   const finish = () => {
     if (closed) return;
@@ -134,11 +137,6 @@ function startRelayPeer({ socket, head, pool }) {
     expectMasked: true,
     maxMessageBytes: MAX_FRAME_BYTES,
     onText: (text) => {
-      // One frame at a time, the same contract the public edge enforces.
-      if (inFlight) {
-        fail(1008, "A relay request is already in flight.");
-        return;
-      }
       let frame;
       try {
         frame = JSON.parse(text);
@@ -148,6 +146,26 @@ function startRelayPeer({ socket, head, pool }) {
           status: 400,
           error: { type: "invalid_request_error", message: "Relay frames must be valid JSON." },
         });
+        return;
+      }
+      // Control frames act on the live turn and never queue behind it.
+      if (frame?.type === "response.interrupt") {
+        if (inFlightConnection && !inFlightConnection.closed) {
+          void inFlightConnection.sendJson({
+            type: "response.interrupt",
+            ...(typeof frame.response_id === "string" && frame.response_id
+              ? { response_id: frame.response_id }
+              : {}),
+            ...(typeof frame.discard_partial_items === "boolean"
+              ? { discard_partial_items: frame.discard_partial_items }
+              : {}),
+          }).catch(() => {});
+        }
+        return;
+      }
+      // One frame at a time, the same contract the public edge enforces.
+      if (inFlight) {
+        fail(1008, "A relay request is already in flight.");
         return;
       }
       if (frame?.type !== "response.create") {
@@ -163,6 +181,7 @@ function startRelayPeer({ socket, head, pool }) {
       }
       inFlight = relayFrame(frame).finally(() => {
         inFlight = undefined;
+        inFlightConnection = undefined;
       });
     },
     onBinary: () => fail(1003, "Binary relay frames are not supported."),
@@ -200,6 +219,7 @@ function startRelayPeer({ socket, head, pool }) {
       });
       return;
     }
+    inFlightConnection = lease.connection;
     try {
       await sendFrameCollectFrames(lease.connection, frame, {
         signal: controller.signal,

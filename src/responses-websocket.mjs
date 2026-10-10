@@ -661,6 +661,11 @@ class ResponsesWebSocketPeer {
     this.abortController = new AbortController();
     this.continuations = new Map();
     this.turnState = undefined;
+    // The turn currently executing on the request queue, if any. An
+    // `response.interrupt` control frame aborts it out of band -- waiting in
+    // the serial queue would deliver the interrupt after the turn finished.
+    this.activeTurn = undefined;
+    this.interrupting = false;
     // The peer is the server side, so it parses masked client frames and
     // answers pings itself; the shared codec owns every frame-level rule.
     this.parser = new WebSocketFrameParser({
@@ -784,12 +789,13 @@ class ResponsesWebSocketPeer {
     if (!hop || hop.closed) {
       try {
         hop = await relay.connectHop(route.providerId, controller.signal);
-      } catch {
+      } catch (error) {
         return false;
       }
       this.hopClients.set(route.providerId, hop);
       hop.onClose = () => this.hopClients?.delete(route.providerId);
     }
+    if (this.activeTurn) this.activeTurn.hop = hop;
     const startedAt = Date.now();
     const outputItems = [];
     let outputItemsBytes = 0;
@@ -846,10 +852,15 @@ class ResponsesWebSocketPeer {
       });
       return true;
     } catch {
+      await chain.catch(() => {});
+      if (this.interrupting) {
+        // The turn ended because the client interrupted it; the cancelled
+        // event was already sent by handleInterrupt.
+        return true;
+      }
       // The frame already left for the provider; retrying it here could run
       // the turn twice. Surface a 502 and let Codex's own retry contract --
       // full request, fresh state -- handle recovery.
-      await chain.catch(() => {});
       this.sendError(502, {
         type: "local_router_stream_failed",
         message: "The provider WebSocket relay ended before response.completed.",
@@ -866,6 +877,19 @@ class ResponsesWebSocketPeer {
   }
 
   enqueue(text) {
+    // Control frames act on the live turn, so they bypass the queue entirely:
+    // queued behind an in-flight request, an interrupt would arrive after the
+    // generation it meant to stop.
+    let frame;
+    try {
+      frame = JSON.parse(text);
+    } catch {
+      frame = undefined;
+    }
+    if (frame && !Array.isArray(frame) && frame.type === "response.interrupt") {
+      void this.handleInterrupt(frame);
+      return;
+    }
     this.pendingRequests += 1;
     if (this.pendingRequests > MAX_QUEUED_REQUESTS) {
       this.fail(1008, "Too many queued Responses requests.");
@@ -874,6 +898,12 @@ class ResponsesWebSocketPeer {
     this.queue = this.queue
       .then(() => this.process(text))
       .catch(() => {
+        // A turn the client interrupted ends as an aborted upstream request.
+        // That is the requested outcome, not a router failure.
+        if (this.interrupting) {
+          this.interrupting = false;
+          return;
+        }
         if (!this.closed) {
           this.sendError(500, {
             type: "local_router_error",
@@ -883,7 +913,34 @@ class ResponsesWebSocketPeer {
       })
       .finally(() => {
         this.pendingRequests -= 1;
+        this.activeTurn = undefined;
       });
+  }
+
+  async handleInterrupt(frame) {
+    const active = this.activeTurn;
+    this.interrupting = Boolean(active);
+    // An interrupt on a relayed turn must reach the provider as the protocol
+    // frame it understands, not only as a dropped socket -- and it must be on
+    // the wire before the abort below tears the hop down.
+    if (active?.hop && !active.hop.closed) {
+      await active.hop.sendJson({
+        type: "response.interrupt",
+        ...(typeof frame.response_id === "string" && frame.response_id
+          ? { response_id: frame.response_id }
+          : {}),
+        ...(typeof frame.discard_partial_items === "boolean"
+          ? { discard_partial_items: frame.discard_partial_items }
+          : {}),
+      }).catch(() => {});
+    }
+    active?.controller?.abort(new Error("response.interrupt"));
+    this.sendJson({
+      type: "response.cancelled",
+      ...(typeof frame.response_id === "string" && frame.response_id
+        ? { response_id: frame.response_id }
+        : {}),
+    });
   }
 
   async process(text) {
@@ -978,6 +1035,7 @@ class ResponsesWebSocketPeer {
     }
 
     const controller = new AbortController();
+    this.activeTurn = { controller, hop: undefined };
     const onClose = () => controller.abort(this.abortController.signal.reason);
     this.abortController.signal.addEventListener("abort", onClose, { once: true });
 
