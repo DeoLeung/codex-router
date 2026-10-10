@@ -453,6 +453,67 @@ function sseBytes(event) {
   return Buffer.from(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`, "utf8");
 }
 
+// The frame-level core a protocol relay needs: send one request frame, hand
+// every server frame to `onFrame`, and resolve at the first terminal event or
+// error frame. No SSE synthesis, no header folding -- callers relay the
+// protocol itself, which is what lets an incremental turn stay incremental.
+export function sendFrameCollectFrames(client, frame, {
+  signal,
+  preludeTimeoutMs = RESPONSES_WS_PRELUDE_TIMEOUT_MS,
+  onFrame = () => {},
+} = {}) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (complete) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      client.acceptingResponses = false;
+      complete();
+    };
+    const timer = setTimeout(() => {
+      settle(() => reject(new WsTransportError(
+        "Upstream produced no Responses frame before the prelude timeout.",
+        "ERR_WS_PRELUDE_TIMEOUT",
+      )));
+      client.abort();
+    }, preludeTimeoutMs);
+    if (typeof timer.unref === "function") timer.unref();
+    const isTerminal = (value) =>
+      TERMINAL_EVENT_TYPES.has(value?.type) || value?.type === "error";
+    client.onJson = (value) => {
+      if (settled) return;
+      onFrame(value);
+      if (isTerminal(value)) settle(() => resolve(value));
+    };
+    client.onClose = () => {
+      settle(() => reject(new WsTransportError(
+        "Upstream WebSocket closed before the turn completed.",
+        "ERR_WS_CLOSED_MID_TURN",
+      )));
+    };
+    const onAbort = () => {
+      settle(() => reject(new WsTransportError("Request aborted.", "ERR_WS_ABORTED")));
+      client.abort();
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    // The client's late-frame guard only admits response frames while a turn
+    // is live; own that lifecycle exactly like collectResponsesRequest does.
+    client.acceptingResponses = true;
+    client.hasSentRequest = true;
+    client.sendJson(frame).then((sent) => {
+      if (!sent) {
+        settle(() => reject(new WsTransportError(
+          "Upstream WebSocket was not writable.",
+          "ERR_WS_NOT_WRITABLE",
+        )));
+      }
+    }, (error) => {
+      settle(() => reject(error instanceof Error ? error : new WsTransportError(String(error))));
+    });
+  });
+}
+
 export async function collectResponsesRequest(client, requestBody, {
   signal,
   preludeTimeoutMs = RESPONSES_WS_PRELUDE_TIMEOUT_MS,

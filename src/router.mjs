@@ -117,6 +117,7 @@ import {
   wsTransportAvailable,
 } from "./responses-ws-client.mjs";
 import { providerPoolRegistry } from "./provider-ws-pool.mjs";
+import { ResponsesWebSocketClient } from "./responses-ws-client.mjs";
 import { createHealthCache } from "./health-cache.mjs";
 import { discoveryDisabled } from "./discovery-mode.mjs";
 import { readNativeAliases } from "./native-alias.mjs";
@@ -6800,11 +6801,41 @@ server.on("upgrade", (request, socket, head) => {
   handleResponsesWebSocketUpgrade(request, socket, head, {
     callerKey: CALLER_KEY,
     authenticateUpgrade: () => hookEndpoint.pathname,
-    // The WebSocket is an edge translation only. Every complete request
-    // re-enters this caller-authenticated HTTP route, so routing, provider
-    // credentials, retries, failover, transforms, usage, and cancellation all
-    // continue to have one implementation.
+    // The WebSocket is an edge translation for every model whose provider
+    // speaks plain HTTP; routing, provider credentials, retries, failover,
+    // transforms, usage, and cancellation keep one implementation there. A
+    // websocket-transport provider instead relays the protocol through the
+    // forwarder's hop: the frame is normalized by the canonical pipeline at
+    // the forwarder, the hop holds one sticky connection so continuation
+    // affinity is preserved, and incremental turns stay incremental.
     responsesUrl: `${callerBaseUrl(LISTEN_PORT, CALLER_KEY)}${hookEndpoint.capability ? CODEX_PATCH_HOOK_BASE_PATH.slice(3) : ""}/responses`,
+    relayTransport: {
+      resolveRoute: (model) => {
+        const route = MODEL_BY_SLUG.get(String(model || ""));
+        if (!route || !usesProviderResponsesWebSocket(route)) return undefined;
+        return { providerId: providerForModel(route)?.id, gatewayModel: route.gatewayModel };
+      },
+      connectHop: (providerId, signal) => ResponsesWebSocketClient.connect(
+        `${loopback(PORTS.api)}/_ws/providers/${encodeURIComponent(providerId)}`,
+        { headers: { Authorization: `Bearer ${INTERNAL_KEY}` }, signal },
+      ),
+      recordUsage: ({ model, provider, status, durationMs, usage }) => {
+        recordObservedUsage({
+          model,
+          provider,
+          status,
+          durationMs,
+          ...(Number.isFinite(usage?.input_tokens) ? { inputTokens: usage.input_tokens } : {}),
+          ...(Number.isFinite(usage?.output_tokens) ? { outputTokens: usage.output_tokens } : {}),
+          ...(Number.isFinite(usage?.total_tokens) ? { totalTokens: usage.total_tokens } : {}),
+        });
+        console.error(
+          `[codex-router] timing at=${new Date().toISOString()} model=${model} provider=${provider} ` +
+            `status=${status} total_ms=${durationMs} transport=websocket-relay` +
+            `${usage?.output_tokens !== undefined ? ` out_tokens=${usage.output_tokens}` : " out_tokens=unknown"}`,
+        );
+      },
+    },
   });
 });
 // Without this an 'error' event is unhandled and the process exits silently.

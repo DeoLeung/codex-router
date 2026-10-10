@@ -106,6 +106,7 @@ import {
   wsTransportAvailable,
 } from "./responses-ws-client.mjs";
 import { providerPoolRegistry } from "./provider-ws-pool.mjs";
+import { handleProviderRelayUpgrade } from "./responses-ws-relay.mjs";
 import { providerTransportError } from "./transport-failure.mjs";
 import {
   endpointCapabilityError,
@@ -2403,6 +2404,36 @@ const server = http.createServer((request, response) => {
 });
 
 applyKeepAliveTimeouts(server);
+// The router edge's relay hop: one upgrade per downstream Codex socket whose
+// turns ride a websocket-transport provider. Authenticated with the same
+// internal key as the HTTP routes; every create frame passes through the
+// canonical normalizeBody pipeline before reaching the provider.
+server.on("upgrade", (request, socket, head) => {
+  handleProviderRelayUpgrade(request, socket, head, {
+    internalKey: INTERNAL_KEY,
+    poolFor: async (providerId) => {
+      const provider = RUNTIME_PROVIDERS.get(providerId);
+      if (!provider || provider.generic !== true || provider.transport !== "websocket") {
+        return undefined;
+      }
+      return genericProviderPools.poolFor(providerId, "/responses");
+    },
+    normalizeFrame: async (frame) => {
+      const normalized = normalizeBody(
+        Buffer.from(JSON.stringify(frame), "utf8"),
+        "application/json",
+        "/responses",
+      );
+      const payload = JSON.parse(normalized.body.toString("utf8"));
+      // previous_response_id names the provider-side baseline of this exact
+      // connection; normalization does not own it, so guarantee it survives.
+      if (typeof frame.previous_response_id === "string" && frame.previous_response_id) {
+        payload.previous_response_id = frame.previous_response_id;
+      }
+      return payload;
+    },
+  });
+});
 reportListenFailure(server, { label: "api-forwarder", host: LISTEN_HOST, port: LISTEN_PORT });
 server.listen(LISTEN_PORT, LISTEN_HOST, () => {
   console.error("[api-forwarder] listening");
